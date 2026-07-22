@@ -1,0 +1,27 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Playwright / Browser
+browser-profile/
+application_screenshots/
+
+# Logs
+logs/
+*.log
+
+# Generated outputs
+job_results.json
+job_results.csv
+job_history.json
+resume_profile.json
+
+# Backups
+*.bak
+*.bak_*
+
+# OS
+.DS_Store
+Thumbs.db
