@@ -1,0 +1,20 @@
+{
+  "years_of_experience": 0,
+  "current_role": "Job Title",
+  "target_roles": [
+    "Target Role 1",
+    "Target Role 2"
+  ],
+  "must_have_skills": [
+    "Skill A",
+    "Skill B"
+  ],
+  "preferred_skills": [
+    "Skill C",
+    "Skill D"
+  ],
+  "preferred_locations": [
+    "City",
+    "Remote"
+  ]
+}

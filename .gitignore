@@ -1,25 +1,56 @@
 # Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Virtual environments
 venv/
-.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Playwright / Browser
+browser-profile/
+application_screenshots/
 
 # Logs
 logs/
+*.log
 
-# Local data
-data/
+# Generated outputs
+job_results.json
+job_results.csv
+job_results.export.json
+job_history.json
+resume_profile.json
 
-# VS Code
-.vscode/
+# Personal / runtime records (never commit real candidate data)
+application_profile.json
+candidate_profile.json
+applications.json
+applications.csv
+applications.export.json
+application_runs.json
+application_metrics.json
 
-# Playwright
-playwright-report/
+# Test runtime artifacts
+.test-runtime*/
+
+# Codex / local review artifacts
+.codex-remote-attachments/
+tmp/
+
+# Generated resume deliverables and personal resume builders
+output/
+build_resume_variants.py
+build_resume_pdfs.py
+
+# Local secrets
+.env
+.env.*
+google_service_account.json
+
+# Backups
+*.bak
+*.bak_*
 
 # OS
 .DS_Store
 Thumbs.db
+
+resume.pdf

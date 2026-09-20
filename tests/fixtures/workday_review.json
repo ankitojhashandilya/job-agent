@@ -1,0 +1,17 @@
+{
+  "url": "https://acme.wd1.myworkdayjobs.com/en-US/careers/job/India/123/apply",
+  "page_title": "Review and Submit | Workday",
+  "domain": "acme.wd1.myworkdayjobs.com",
+  "page_type": "application_form",
+  "fields": [
+    {"id": "field:current_title", "field_type": "text", "label": "Current Job Title", "value": "filled", "required": true},
+    {"id": "field:work_authorization", "field_type": "checkbox", "label": "Authorized to work", "value": "true", "required": true}
+  ],
+  "file_inputs": [
+    {"id": "upload:resume", "label": "Upload Resume", "has_file": true, "required": true}
+  ],
+  "buttons": [
+    {"id": "button:submit", "text": "Submit", "button_type": "submit"}
+  ],
+  "error_messages": []
+}

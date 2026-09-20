@@ -1,0 +1,1 @@
+"""Core domain models, persistence, and logging for the job agent."""

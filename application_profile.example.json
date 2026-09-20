@@ -1,0 +1,29 @@
+{
+  "resume_path": "C:\\path\\to\\your\\resume.pdf",
+  "candidate": {
+    "first_name": "First",
+    "last_name": "Last",
+    "full_name": "First Last",
+    "email": "first.last@example.com",
+    "phone": "+00 0000000000",
+    "city": "City",
+    "country": "Country",
+    "current_company": "",
+    "current_title": "Job Title",
+    "years_of_experience": "0",
+    "notice_period": "",
+    "current_ctc": "",
+    "expected_ctc": "",
+    "linkedin_url": "",
+    "github_url": "",
+    "portfolio_url": ""
+  },
+  "application_answers": {
+    "work_authorization": "",
+    "visa_sponsorship": "",
+    "relocation": "",
+    "notice_period": ""
+  },
+  "safe_autofill": true,
+  "stop_before_submit": true
+}

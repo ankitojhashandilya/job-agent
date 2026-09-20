@@ -1,0 +1,17 @@
+{
+  "url": "https://www.linkedin.com/jobs/view/123/easy-apply",
+  "page_title": "Review your application | LinkedIn",
+  "domain": "www.linkedin.com",
+  "page_type": "application_form",
+  "fields": [
+    {"id": "field:first_name", "field_type": "text", "label": "First Name", "value": "filled", "required": true},
+    {"id": "field:email", "field_type": "email", "label": "Email", "value": "filled", "required": true}
+  ],
+  "file_inputs": [
+    {"id": "upload:resume", "label": "Resume", "has_file": true, "required": true}
+  ],
+  "buttons": [
+    {"id": "button:submit_application", "text": "Submit application", "button_type": "submit"}
+  ],
+  "error_messages": []
+}
