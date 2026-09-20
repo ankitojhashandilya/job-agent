@@ -49,6 +49,7 @@ class Button:
         enabled: Whether the button is enabled for interaction.
         interactable: Whether the button can be clicked
             (visible AND enabled).
+        href: Destination URL for link-style buttons, if present.
     """
 
     id: str
@@ -57,6 +58,7 @@ class Button:
     visible: bool = True
     enabled: bool = True
     interactable: bool = True
+    href: str = ""
 
 
 @dataclass
@@ -67,6 +69,7 @@ class FileInput:
         id: Stable reference ID.
         label: Human-readable label for the upload field.
         has_file: True if a file is already selected/uploaded.
+        required: Whether the form requires a document at this point.
         visible: Whether the upload field is currently visible.
         enabled: Whether the upload field is enabled.
         interactable: Whether the field can be used
@@ -76,6 +79,7 @@ class FileInput:
     id: str
     label: str
     has_file: bool = False
+    required: bool = False
     visible: bool = True
     enabled: bool = True
     interactable: bool = True

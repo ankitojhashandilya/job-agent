@@ -22,6 +22,96 @@ Job-agent searches LinkedIn for matching roles, evaluates each job against your 
 - **Job history tracking** — remembers which jobs have been seen, scored, or applied to across runs
 - **Persistent browser session** — LinkedIn login persists between runs via a local Chromium profile
 
+## Application Automation Contract
+
+The production apply command uses one evidence-based browser-agent path. By
+default, it never clicks a final submit control; instead it hands the
+application back to you only after it reaches a verified review state. The
+optional `--confirm-submit` mode asks for a fresh terminal confirmation at the
+detected final control and submits only when you type `SUBMIT` for that exact
+application.
+
+`review_ready` requires proof that the form opened, every required field is
+complete, any required resume upload succeeded, no validation errors remain,
+and a final review/submit control is visible. Each run stores a redacted page
+snapshot, action timeline, final URL, and screenshot in the local application
+run record.
+
+| ATS platform | Current capability |
+|---|---|
+| LinkedIn Easy Apply | Supported pre-submit flow |
+| Workday | Supported pre-submit flow |
+| Greenhouse | Supported pre-submit flow |
+| Other ATS platforms | `unsupported` / manual handoff |
+
+Run `python application_runs.py` to produce `application_metrics.json`. The
+verified review-ready rate is calculated only from applications whose saved
+evidence satisfies this contract; it is not inferred from a browser page load.
+
+### Authentication and submission controls
+
+Sign in manually once using the persistent local browser profile:
+
+```powershell
+.\venv\Scripts\python.exe .\login_linkedin.py
+```
+
+The agent never creates an account, enters credentials, handles MFA/CAPTCHA,
+or uses Ollama to make identity or submission decisions. If a new account is
+needed, create it yourself in the visible browser and complete email
+verification before rerunning the agent. To generate a password for your own
+password manager without saving it in this project:
+
+```powershell
+.\venv\Scripts\python.exe .\generate_password.py
+```
+
+Prepare applications without submitting (default):
+
+```powershell
+.\venv\Scripts\python.exe .\apply_top_jobs.py
+```
+
+Allow a submission only after the terminal displays the job and you type the
+exact confirmation phrase at its final control:
+
+```powershell
+.\venv\Scripts\python.exe .\apply_top_jobs.py --confirm-submit
+```
+
+Ollama is used for job-fit analysis and may summarize unfamiliar questions for
+human review. Deterministic code—not the model—controls ATS support, field
+mapping, authentication walls, validation checks, passwords, and submission.
+
+### Pre-submit authority matrix
+
+| Situation | Agent authority | Condition |
+|---|---|---|
+| LinkedIn Easy Apply | Open and complete the supported form | Visible entry control; no final submit |
+| Generic LinkedIn Apply | Open only after terminal `APPLY` confirmation | It can share your LinkedIn profile with the job poster |
+| Workday / Greenhouse form | Fill known values, upload resume, click Next/Continue/Review | ATS URL is explicitly detected and every required value is known |
+| Common required answer | Fill only if explicitly listed in `application_answers` | Never inferred from the resume or by Ollama |
+| Unknown required question / custom assessment | Stop for review | Requires your answer |
+| Login, account creation, MFA, CAPTCHA | Stop for you | Identity and verification remain manual |
+| Salary, demographic, legal, or consent question | Stop for review | Requires deliberate user input for that application |
+| Final submit | Prompt only with `--confirm-submit` | Requires exact terminal `SUBMIT` confirmation |
+
+To allow common application answers, add only facts you have personally
+confirmed to the ignored local `application_profile.json` file. For example:
+
+```json
+"application_answers": {
+  "work_authorization": "Yes",
+  "visa_sponsorship": "No",
+  "relocation": "Yes",
+  "notice_period": "30 days"
+}
+```
+
+The model is never allowed to generate these answers. When enabled, its sole
+fallback role is mapping an unfamiliar non-sensitive *label* to an already
+known candidate field; it never receives candidate values or controls clicks.
+
 ---
 
 ## Architecture
@@ -179,7 +269,7 @@ Edit `application_profile.json`:
 
 ```json
 {
-  "resume_path": "C:\\job-agent\\resume.pdf",
+  "resume_path": "C:\\AI\\Projects\\job-agent\\resume.pdf",
   "candidate": {
     "first_name": "Your",
     "last_name": "Name",

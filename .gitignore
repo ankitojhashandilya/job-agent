@@ -15,8 +15,35 @@ logs/
 # Generated outputs
 job_results.json
 job_results.csv
+job_results.export.json
 job_history.json
 resume_profile.json
+
+# Personal / runtime records (never commit real candidate data)
+application_profile.json
+candidate_profile.json
+applications.json
+applications.csv
+applications.export.json
+application_runs.json
+application_metrics.json
+
+# Test runtime artifacts
+.test-runtime*/
+
+# Codex / local review artifacts
+.codex-remote-attachments/
+tmp/
+
+# Generated resume deliverables and personal resume builders
+output/
+build_resume_variants.py
+build_resume_pdfs.py
+
+# Local secrets
+.env
+.env.*
+google_service_account.json
 
 # Backups
 *.bak
@@ -25,3 +52,5 @@ resume_profile.json
 # OS
 .DS_Store
 Thumbs.db
+
+resume.pdf

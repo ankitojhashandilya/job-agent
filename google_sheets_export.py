@@ -1,10 +1,9 @@
 import csv
-import os
 from pathlib import Path
 
+from config import GOOGLE_CREDENTIALS_PATH, GOOGLE_SHEET_NAME, JOB_RESULTS_CSV
 
-PROJECT_DIR = Path(__file__).resolve().parent
-CSV_OUTPUT = PROJECT_DIR / "job_results.csv"
+CSV_OUTPUT = JOB_RESULTS_CSV
 
 
 def main() -> None:
@@ -16,23 +15,19 @@ def main() -> None:
             ".\\venv\\Scripts\\python.exe -m pip install gspread google-auth"
         ) from error
 
-    credentials_path = os.environ.get(
-        "GOOGLE_APPLICATION_CREDENTIALS",
-        str(PROJECT_DIR / "google_service_account.json"),
-    )
-
-    sheet_name = os.environ.get("JOB_AGENT_SHEET_NAME", "Job Tracker")
+    credentials_path = Path(GOOGLE_CREDENTIALS_PATH)
+    sheet_name = GOOGLE_SHEET_NAME
 
     if not Path(credentials_path).exists():
         raise SystemExit(
             "Google credentials file not found.\n"
             f"Expected: {credentials_path}\n\n"
             "Create a Google Cloud service account, download its JSON key, "
-            "save it as C:\\job-agent\\google_service_account.json, then share "
+            "save it as C:\\AI\\Projects\\job-agent\\google_service_account.json, then share "
             "the 'Job Tracker' Google Sheet with the service account email."
         )
 
-    client = gspread.service_account(filename=credentials_path)
+    client = gspread.service_account(filename=str(credentials_path))
     spreadsheet = client.open(sheet_name)
     worksheet = spreadsheet.sheet1
 

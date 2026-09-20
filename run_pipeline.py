@@ -159,13 +159,13 @@ def main() -> None:
         required_output=RESUME_PROFILE_PATH,
     )
 
-    #
+#
     # Stage 2
     #
-    print("\nStage 2: LinkedIn Job Discovery")
+    print("\nStage 2: Job Discovery")
 
     run_script(
-        "linkedin_score_jobs.py",
+        "discovery.py",
         required_output=JOB_RESULTS_JSON,
         required_min_items=1,
     )

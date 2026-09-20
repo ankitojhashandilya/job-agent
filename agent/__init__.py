@@ -2,17 +2,6 @@
 
 This package implements a perception-action loop that replaces
 hardcoded ATS-specific workflows with LLM-driven decision making.
-
-Modules:
-    types: Shared data models for the agent's internal API.
-    observe: Page observation layer — converts a Playwright page
-        into a structured, token-efficient snapshot.
-    # Future modules (planned in roadmap):
-    #   plan: LLM-based action planner.
-    #   execute: Playwright action executor.
-    #   safety: Submit-action guard.
-    #   verify: Goal state verifier.
-    #   agent: Main execution loop.
 """
 
 from agent.types import (
@@ -27,9 +16,14 @@ from agent.types import (
 )
 
 from agent.observe import observe_page
+from agent.execute import Executor, BrowserCommand, BrowserAction, ExecutionResult
 
 __all__ = [
     "observe_page",
+    "Executor",
+    "BrowserCommand",
+    "BrowserAction",
+    "ExecutionResult",
     "PageSnapshot",
     "FormField",
     "Button",

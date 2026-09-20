@@ -13,5 +13,9 @@ def launch_linkedin_context(playwright):
         viewport={"width": 1440, "height": 900},
         locale="en-IN",
         timezone_id="Asia/Kolkata",
-        args=["--start-maximized"],
+        # LinkedIn can fail before page load on some Windows/Chrome network
+        # stacks when Chromium selects QUIC/HTTP3.  Use normal HTTPS/TCP for
+        # deterministic automation; this changes transport only, not safety
+        # behaviour or login state.
+        args=["--start-maximized", "--disable-quic"],
     )

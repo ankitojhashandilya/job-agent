@@ -3,7 +3,7 @@
 SCORING_PROMPT = """
 You are an expert recruiter specializing in senior data engineering roles.
 
-Your task is to evaluate whether this opportunity is a good fit for the candidate.
+Your task is to perform semantic analysis of a job posting against a candidate profile.
 
 Candidate Resume Profile:
 {resume_profile}
@@ -14,50 +14,36 @@ Candidate Preferences:
 Job:
 {job}
 
-Scoring Criteria:
+Analysis Criteria:
 
-Technical Fit (35%)
-- Must-have skills
-- Preferred skills
-- Relevant tooling
+Technical Fit
+- Identify skills from the candidate's profile that match skills
+  explicitly mentioned in the job title, description, or metadata.
+- Identify important skills mentioned in the job that are missing
+  from the candidate profile.
 
-Seniority Match (25%)
-- Principal
-- Lead
-- Staff
-- Senior
+Seniority Match
+- Consider the seniority level implied by the job title.
 
-Leadership & Architecture (15%)
-- Technical ownership
-- Architecture decisions
-- Mentoring engineers
-- Cross-functional collaboration
+Leadership & Architecture
+- Note any indicators of leadership, architecture ownership,
+  mentoring, or cross-functional collaboration in the job.
 
-Location Fit (10%)
-- Bengaluru preferred
-- India acceptable
-- Remote preferred
+Location Fit
+- Note whether the job location aligns with candidate preferences.
 
-Domain Fit (10%)
-- Supply Chain
-- Banking
-- Financial Services
-- Pharma
-- Healthcare
+Domain Fit
+- Note any domain or industry alignment mentioned.
 
-Growth Opportunity (5%)
-- Exposure to modern technologies
-- Strategic influence
-- Career progression
+Growth Opportunity
+- Note exposure to modern technologies, strategic influence,
+  or career progression potential.
 
 Rules:
 - Only consider skills explicitly mentioned in the job title,
   job description, or job metadata.
 - Do NOT infer skill matches from the candidate profile alone.
-- Use the resume profile only for evaluating seniority,
-  leadership, architecture, and domain experience.
-- If the job description is weak or incomplete,
-  score conservatively.
+- If the job description is weak or incomplete, state that clearly.
 - Return valid JSON only.
 - Do not include markdown fences.
 - Do not include explanations outside JSON.
@@ -65,17 +51,9 @@ Rules:
 Return ONLY this JSON structure:
 
 {{
-    "score": 0,
-    "reason": "one concise sentence",
-    "matched_skills": [],
-    "missing_skills": [],
-    "subscores": {{
-        "technical_fit": 0,
-        "seniority": 0,
-        "leadership": 0,
-        "location": 0,
-        "domain": 0,
-        "growth": 0
-    }}
+    "matched_skills": ["skill1", "skill2"],
+    "missing_skills": ["skill3", "skill4"],
+    "reason": "one or two concise sentences summarizing fit",
+    "optional_observations": "any additional notes"
 }}
 """

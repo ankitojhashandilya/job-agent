@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import re
 import urllib.parse
 import uuid
@@ -9,6 +8,7 @@ from typing import Any
 
 from playwright.sync_api import Page
 
+from agent.resolver import ElementResolver
 from agent.types import Button, FileInput, FormField, PageSnapshot
 from browser.extraction import (
     classify_page_state,
@@ -34,6 +34,42 @@ _ERROR_PATTERNS: list[str] = [
     "invalid format",
     "please fix",
 ]
+
+_CAPTCHA_PATTERNS: tuple[str, ...] = (
+    "captcha",
+    "recaptcha",
+    "verify you are human",
+    "security challenge",
+)
+
+_EXTERNAL_APPLY_PATTERNS: tuple[str, ...] = (
+    "your profile was shared with the job poster",
+    "job moved to in progress under clicked apply",
+    "did you finish applying?",
+)
+
+
+def _normalised_notice_text(text: str) -> str:
+    """Normalise browser toast text before making a safety decision."""
+    return re.sub(r"\s+", " ", text or "").strip().casefold()
+
+
+def _is_linkedin_progress_notice(text: str) -> bool:
+    """Return true for LinkedIn's non-error external-apply tracking toast.
+
+    LinkedIn exposes this as a role=alert even though it means that the
+    generic Apply action was accepted.  Treating it as form validation blocks
+    the handoff before the agent can inspect the external destination.
+    """
+    notice = _normalised_notice_text(text)
+    return any(
+        pattern in notice
+        for pattern in (
+            "job moved to in progress under clicked apply",
+            "your profile was shared with the job poster",
+            "did you finish applying?",
+        )
+    )
 
 _FIELD_SELECTORS: dict[str, str] = {
     "input": "input:not([type='hidden']):not([type='submit']):not([type='reset']):not([type='button'])",
@@ -108,87 +144,6 @@ _NAV_LANDMARK_SELECTORS = [
 ]
 
 
-# ── ID helpers ─────────────────────────────────────────────────────
-
-def _slugify(text: str) -> str:
-    slug = text.lower().strip()
-    slug = re.sub(r"[^a-z0-9]+", "_", slug)
-    return slug.strip("_")
-
-
-def _element_fingerprint(element: Any, field_type: str) -> str:
-    parts: list[str] = [field_type]
-    for attr_name in ["name", "id", "class", "placeholder"]:
-        try:
-            val = element.get_attribute(attr_name)
-            if val:
-                parts.append(f"{attr_name}={val.strip()}")
-        except Exception:
-            pass
-    raw = "|".join(parts)
-    return hashlib.md5(raw.encode()).hexdigest()[:7]
-
-
-def _make_candidate_field_id(element: Any, label: str, field_type: str) -> str:
-    if label:
-        slug = _slugify(label)
-        if slug:
-            return f"field:{slug}"
-    try:
-        name = element.get_attribute("name")
-        if name and name.strip():
-            safe_name = _slugify(name.strip())
-            if safe_name:
-                return f"field:{safe_name}"
-    except Exception:
-        pass
-    try:
-        elem_id = element.get_attribute("id")
-        if elem_id and elem_id.strip():
-            safe_id = _slugify(elem_id.strip())
-            if safe_id:
-                return f"field:{safe_id}"
-    except Exception:
-        pass
-    fingerprint = _element_fingerprint(element, field_type)
-    return f"field:{fingerprint}"
-
-
-def _make_candidate_button_id(button_text: str) -> str:
-    if button_text:
-        slug = _slugify(button_text)
-        if slug:
-            return f"button:{slug}"
-    return f"button:_{_slugify(button_text)}" if button_text else "button:_"
-
-
-def _make_candidate_file_id(label: str) -> str:
-    if label:
-        slug = _slugify(label)
-        if slug:
-            return f"upload:{slug}"
-    return "upload:_"
-
-
-def _make_unique_id(candidate_id: str, used_ids: set[str]) -> str:
-    """Ensure uniqueness by appending ``_2``, ``_3``, etc.
-
-    Args:
-        candidate_id: The semantic ID produced by the make-candidate function.
-        used_ids: Set of IDs already assigned in the current extraction pass.
-
-    Returns:
-        The candidate ID if unused, or ``candidate_id + _N`` for the
-        first available suffix.
-    """
-    if candidate_id not in used_ids:
-        return candidate_id
-    suffix = 2
-    while f"{candidate_id}_{suffix}" in used_ids:
-        suffix += 1
-    return f"{candidate_id}_{suffix}"
-
-
 # ── Navigation-landmark detection ─────────────────────────────────
 
 def _is_inside_nav_landmark(element: Any) -> bool:
@@ -248,10 +203,11 @@ def _classify_page_type(page: Page, legacy_state: str) -> str:
     5. **login_required** (re-check) — body text contains sign-in keywords
        even when legacy classifier missed it.
     6. **unavailable** (re-check) — body text contains job-expired keywords.
-    7. **search** — page has an input with placeholder matching search
+    7. **job_details** — known LinkedIn job-view URL with no application
+       form.  LinkedIn keeps a global search input in its job-detail header,
+       so the URL must win over that navigation-chrome signal.
+    8. **search** — page has an input with placeholder matching search
        keywords, but no personal-info form fields.
-    8. **job_details** — page has structured job-description content and
-       at most one form field or button.
     9. **application_form** — has 1+ form fields with personal-info labels
        OR file-upload controls.
     10. **application_form** (fallback) — has form fields + buttons with
@@ -274,8 +230,16 @@ def _classify_page_type(page: Page, legacy_state: str) -> str:
     except Exception:
         pass
 
-    if any(needle in body_text for needle in _CONFIRMATION_PATTERNS):
+    normalised_body_text = _normalised_notice_text(body_text)
+
+    if any(needle in normalised_body_text for needle in _CONFIRMATION_PATTERNS):
         return "confirmation"
+
+    if any(needle in normalised_body_text for needle in _CAPTCHA_PATTERNS):
+        return "captcha_detected"
+
+    if any(needle in normalised_body_text for needle in _EXTERNAL_APPLY_PATTERNS):
+        return "external_apply_started"
 
     if any(needle in body_text for needle in _ERROR_PATTERNS):
         if any(needle in body_text for needle in _CONFIRMATION_PATTERNS):
@@ -372,6 +336,14 @@ def _classify_page_type(page: Page, legacy_state: str) -> str:
                 _has_personal_form = True
 
     # ── Classification rules ─────────────────────────────────
+    is_linkedin_job_detail = (
+        "linkedin.com/jobs/view/" in url_lower
+        and not _has_personal_form
+        and not _has_file_upload
+    )
+    if is_linkedin_job_detail:
+        return "job_details"
+
     if _has_search_input and not _has_personal_form and not _has_file_upload:
         return "search"
 
@@ -386,9 +358,8 @@ def _classify_page_type(page: Page, legacy_state: str) -> str:
 
 # ── Field extraction ──────────────────────────────────────────────
 
-def _extract_fields(page: Page) -> list[FormField]:
+def _extract_fields(page: Page, resolver: ElementResolver) -> list[FormField]:
     fields: list[FormField] = []
-    used_ids: set[str] = set()
 
     for selector_key, selector in _FIELD_SELECTORS.items():
         try:
@@ -413,7 +384,10 @@ def _extract_fields(page: Page) -> list[FormField]:
                 if selector_key == "input":
                     element_type = element.get_attribute("type") or "text"
                     try:
-                        current_value = element.input_value(timeout=300)
+                        if element_type in ("checkbox", "radio"):
+                            current_value = "true" if element.is_checked(timeout=300) else ""
+                        else:
+                            current_value = element.input_value(timeout=300)
                     except Exception:
                         current_value = ""
                 elif selector_key == "textarea":
@@ -455,9 +429,7 @@ def _extract_fields(page: Page) -> list[FormField]:
             except Exception:
                 pass
 
-            candidate = _make_candidate_field_id(element, label, element_type)
-            field_id = _make_unique_id(candidate, used_ids)
-            used_ids.add(field_id)
+            field_id = resolver.field_id(element, label, element_type)
 
             interactable = visible and enabled and not readonly
 
@@ -480,14 +452,16 @@ def _extract_fields(page: Page) -> list[FormField]:
 
 # ── Button extraction ─────────────────────────────────────────────
 
-def _extract_buttons(page: Page) -> list[Button]:
+def _extract_buttons(page: Page, resolver: ElementResolver) -> list[Button]:
     buttons: list[Button] = []
-    used_ids: set[str] = set()
     seen_texts: set[str] = set()
 
     button_selectors = [
         "button",
         "a[role='button']",
+        # Several LinkedIn job cards implement their Apply entry point as a
+        # styled anchor without role="button".
+        "a[href]",
         "[role='button']:not(a)",
     ]
 
@@ -525,10 +499,15 @@ def _extract_buttons(page: Page) -> list[Button]:
             seen_texts.add(text)
 
             button_type = "button"
+            href = ""
             try:
                 btn_type = element.get_attribute("type")
                 if btn_type == "submit":
                     button_type = "submit"
+            except Exception:
+                pass
+            try:
+                href = element.get_attribute("href") or ""
             except Exception:
                 pass
 
@@ -543,9 +522,7 @@ def _extract_buttons(page: Page) -> list[Button]:
             except Exception:
                 pass
 
-            candidate = _make_candidate_button_id(text)
-            button_id = _make_unique_id(candidate, used_ids)
-            used_ids.add(button_id)
+            button_id = resolver.button_id(text)
 
             interactable = visible and enabled
 
@@ -557,6 +534,7 @@ def _extract_buttons(page: Page) -> list[Button]:
                     visible=visible,
                     enabled=enabled,
                     interactable=interactable,
+                    href=href,
                 )
             )
 
@@ -565,9 +543,8 @@ def _extract_buttons(page: Page) -> list[Button]:
 
 # ── File-input extraction ─────────────────────────────────────────
 
-def _extract_file_inputs(page: Page) -> list[FileInput]:
+def _extract_file_inputs(page: Page, resolver: ElementResolver) -> list[FileInput]:
     inputs: list[FileInput] = []
-    used_ids: set[str] = set()
 
     try:
         elements = page.locator("input[type='file']")
@@ -587,8 +564,13 @@ def _extract_file_inputs(page: Page) -> list[FileInput]:
         label = label_text_for_input(element)
 
         has_file = False
+        required = False
         try:
             has_file = element.input_value(timeout=300) != ""
+        except Exception:
+            pass
+        try:
+            required = element.get_attribute("required") is not None
         except Exception:
             pass
 
@@ -603,9 +585,7 @@ def _extract_file_inputs(page: Page) -> list[FileInput]:
         except Exception:
             pass
 
-        candidate = _make_candidate_file_id(label)
-        file_id = _make_unique_id(candidate, used_ids)
-        used_ids.add(file_id)
+        file_id = resolver.file_id(label)
 
         interactable = visible and enabled
 
@@ -614,6 +594,7 @@ def _extract_file_inputs(page: Page) -> list[FileInput]:
                 id=file_id,
                 label=label or f"File Upload {index + 1}",
                 has_file=has_file,
+                required=required,
                 visible=visible,
                 enabled=enabled,
                 interactable=interactable,
@@ -645,7 +626,20 @@ def _detect_error_messages(page: Page) -> list[str]:
                 try:
                     if element.is_visible(timeout=300):
                         text = element.inner_text(timeout=300).strip()
-                        if text:
+                        text_lower = _normalised_notice_text(text)
+                        # LinkedIn uses role=alert for informational toasts,
+                        # including its "profile was shared" click-tracker.
+                        # Only preserve messages with a real validation/error
+                        # signal for the verifier.
+                        if _is_linkedin_progress_notice(text):
+                            continue
+                        if text and any(
+                            marker in text_lower
+                            for marker in (
+                                "error", "invalid", "required", "please correct",
+                                "please enter", "please fix", "unable", "failed",
+                            )
+                        ):
                             messages.append(text)
                 except Exception:
                     continue
@@ -733,9 +727,11 @@ def observe_page(page: Page) -> PageSnapshot:
             observation_id=uuid.uuid4().hex[:12],
         )
 
-    fields = _extract_fields(page)
-    buttons = _extract_buttons(page)
-    file_inputs = _extract_file_inputs(page)
+    resolver = ElementResolver(page)
+
+    fields = _extract_fields(page, resolver)
+    buttons = _extract_buttons(page, resolver)
+    file_inputs = _extract_file_inputs(page, resolver)
     error_messages = _detect_error_messages(page)
     status_message = _detect_status_message(page)
 

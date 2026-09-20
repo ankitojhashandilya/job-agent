@@ -1,0 +1,16 @@
+{
+  "url": "https://boards.greenhouse.io/acme/jobs/123/application",
+  "page_title": "Submit Application | Acme",
+  "domain": "boards.greenhouse.io",
+  "page_type": "application_form",
+  "fields": [
+    {"id": "field:phone", "field_type": "tel", "label": "Phone", "value": "filled", "required": true}
+  ],
+  "file_inputs": [
+    {"id": "upload:resume", "label": "Resume/CV", "has_file": true, "required": true}
+  ],
+  "buttons": [
+    {"id": "button:submit_application", "text": "Submit Application", "button_type": "submit"}
+  ],
+  "error_messages": []
+}

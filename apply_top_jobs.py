@@ -1,3 +1,4 @@
+import argparse
 import csv
 import json
 import re
@@ -13,6 +14,9 @@ from browser.extraction import (
     label_text_for_input,
 )
 from browser_session import launch_linkedin_context
+from application_runs import append_run, write_metrics
+from agent.evidence import make_review_evidence
+from config import APPLY_SCORE, TOP_APPLICATIONS
 from job_history import already_applied_or_ready, update_job_history
 
 
@@ -22,7 +26,7 @@ APPLICATION_PROFILE_PATH = PROJECT_DIR / "application_profile.json"
 APPLICATIONS_JSON = PROJECT_DIR / "applications.json"
 APPLICATIONS_CSV = PROJECT_DIR / "applications.csv"
 SCREENSHOT_DIR = PROJECT_DIR / "application_screenshots"
-TOP_N = 5
+TOP_N = TOP_APPLICATIONS
 
 FINAL_SUBMIT_PATTERNS = re.compile(
     r"^(submit application|submit|send application)$",
@@ -48,6 +52,29 @@ def load_json(path: Path, default):
     if not path.exists():
         return default
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def candidate_values(profile: dict) -> dict:
+    """Return explicit autofill values from the local application profile.
+
+    ``application_answers`` is intentionally separate from personal identity
+    data.  It lets the user opt in to common application answers such as work
+    authorization or notice period without allowing the agent to infer them.
+    """
+    candidate = profile.get("candidate", {}) if isinstance(profile, dict) else {}
+    answers = profile.get("application_answers", {}) if isinstance(profile, dict) else {}
+    if not isinstance(candidate, dict):
+        candidate = {}
+    if not isinstance(answers, dict):
+        answers = {}
+    return {
+        **candidate,
+        **{
+            str(key): value
+            for key, value in answers.items()
+            if isinstance(value, (str, int, float, bool)) and str(value).strip()
+        },
+    }
 
 
 def save_applications(records: list[dict]) -> None:
@@ -78,6 +105,23 @@ def save_applications(records: list[dict]) -> None:
                 row["fields_filled"] = ", ".join(row["fields_filled"])
             writer.writerow(row)
 
+    # Export label — applications.json/csv are exports, not the system of
+    # record (job_history.json is authoritative). Companion marker keeps
+    # the export formats byte-for-byte compatible with existing consumers.
+    APPLICATIONS_JSON.with_name("applications.export.json").write_text(
+        json.dumps(
+            {
+                "_export": True,
+                "kind": "applications",
+                "system_of_record": "job_history.json",
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
+                "files": ["applications.json", "applications.csv"],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
 
 def normalized_score(job: dict) -> int:
     score = int(job.get("match_score") or 0)
@@ -86,10 +130,79 @@ def normalized_score(job: dict) -> int:
     return score
 
 
+def _is_test_or_placeholder_url(url: str) -> bool:
+    """Return whether *url* is clearly a non-live fixture or placeholder."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or host == "localhost"
+        or host.endswith(".test")
+        or host.endswith(".example")
+        or host in {"example.com", "example.org", "example.net"}
+    )
+
+
+def is_actionable_job(job: dict) -> bool:
+    """Return whether a scored result is safe to send to the apply stage.
+
+    Only jobs explicitly labelled ``Apply`` and meeting the configured
+    threshold are eligible.  This prevents fixture data, rejected roles, and
+    malformed URLs from ever opening a browser session.
+    """
+    status = str(job.get("status") or "").strip().lower()
+    return (
+        status == "apply"
+        and normalized_score(job) >= APPLY_SCORE
+        and not _is_test_or_placeholder_url(str(job.get("url") or ""))
+    )
+
+
 def top_jobs() -> list[dict]:
     jobs = load_json(JOB_RESULTS_PATH, [])
-    ranked = sorted(jobs, key=normalized_score, reverse=True)
+    actionable = [job for job in jobs if is_actionable_job(job)]
+    ranked = sorted(actionable, key=normalized_score, reverse=True)
     return ranked[:TOP_N]
+
+
+def is_retryable_application_record(record: dict) -> bool:
+    """Return whether it is safe to retry a prior non-destructive attempt."""
+    status = str(record.get("status") or "").strip().lower()
+    if status in {
+        "apply_button_not_found",
+        "error",
+        "job_apply_redirect_lost",
+        "navigation_failed",
+        "entry_action_not_found",
+        "external_apply_confirmation_required",
+        # Authentication is user-controlled state.  The agent never enters
+        # credentials, but may safely retry after the user signs in.
+        "login_required",
+    }:
+        return True
+    # Older records used the broad ``failed`` state.  Retrying a known
+    # pre-navigation transport failure is safe because no form was opened.
+    notes = str(record.get("notes") or "")
+    evidence = record.get("evidence") or {}
+    snapshot = evidence.get("snapshot") or {} if isinstance(evidence, dict) else {}
+    errors = snapshot.get("error_messages") or [] if isinstance(snapshot, dict) else []
+    if status == "failed" and any(
+        "job moved to in progress under clicked apply" in str(message).casefold()
+        for message in errors
+    ):
+        # Historical false failures caused by LinkedIn's informational toast.
+        # The form was never opened, so retrying after the verifier fix is safe.
+        return True
+    if status == "manual_required" and "No recognized safe action is available on this page." in notes:
+        # Older runs recorded this pre-form detection bug as manual_required.
+        # It is safe to retry after an adapter/classification update because no
+        # form action took place.
+        return True
+    return status == "failed" and any(
+        signature in notes
+        for signature in ("ERR_QUIC_PROTOCOL_ERROR", "ERR_NETWORK_ACCESS_DENIED")
+    )
 
 
 def safe_filename(text: str) -> str:
@@ -437,7 +550,7 @@ def detect_final_submit_buttons(page) -> list[str]:
 def process_job(context, job: dict, profile: dict, existing_records: list[dict]) -> dict:
     page = context.new_page()
     resume_path = Path(profile.get("resume_path", ""))
-    candidate = profile.get("candidate", {})
+    candidate = candidate_values(profile)
     screenshot_path = ""
     notes = []
     apply_type = "unknown"
@@ -554,26 +667,193 @@ def process_job(context, job: dict, profile: dict, existing_records: list[dict])
     }
 
 
-def main() -> None:
+def _process_job_browser_agent(
+    context,
+    job: dict,
+    profile: dict,
+    existing_records: list[dict],
+    *,
+    allow_user_confirmed_submit: bool = False,
+    allow_external_apply: bool = False,
+) -> dict:
+    """Production application path: agent execution plus strict evidence."""
+    from agent.agent import run_agent
+    from agent.types import TaskInfo
+
+    page = context.new_page()
+    resume_path = Path(profile.get("resume_path", ""))
+    candidate = candidate_values(profile)
+    screenshot_path = ""
+    notes = []
+    status = "started"
+    final_apply_url = ""
+    result = None
+    evidence = None
+    submit_confirmed = False
+
+    def confirm_final_submit(snapshot, command) -> bool:
+        nonlocal submit_confirmed
+        print()
+        print("FINAL SUBMISSION REVIEW")
+        print(f"  Job: {job.get('title', '')} at {job.get('company', '')}")
+        print(f"  URL: {snapshot.url}")
+        print(f"  Control: {command.target or 'final submit'}")
+        answer = input("Type SUBMIT to send this application, or press Enter to keep it for review: ")
+        submit_confirmed = answer.strip() == "SUBMIT"
+        return submit_confirmed
+
+    def confirm_external_apply(snapshot, command) -> bool:
+        print()
+        print("EXTERNAL APPLY REVIEW")
+        print(f"  Job: {job.get('title', '')} at {job.get('company', '')}")
+        print(f"  URL: {snapshot.url}")
+        print("  LinkedIn may share your profile with the job poster before opening an external application.")
+        answer = input("Type APPLY to share your profile and continue, or press Enter to keep this job for review: ")
+        return answer.strip() == "APPLY"
+
+    try:
+        page.goto(job["url"], wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(3000)
+
+        task = TaskInfo(
+            resume_path=str(resume_path) if resume_path.exists() else "",
+            candidate=candidate,
+        )
+
+        result = run_agent(
+            page,
+            task=task,
+            submit_approval=confirm_final_submit if allow_user_confirmed_submit else None,
+            external_apply_approval=confirm_external_apply if allow_external_apply else None,
+        )
+
+        notes.append(f"Agent completed in {result.iterations} iterations with status {result.status}")
+        notes.append(f"Last action: {result.last_action}")
+        if result.reason:
+            notes.append(result.reason)
+
+        result_page = result.active_page or page
+        SCREENSHOT_DIR.mkdir(exist_ok=True)
+        screenshot_file = (
+            SCREENSHOT_DIR
+            / f"{safe_filename(job.get('company', 'company'))}_{safe_filename(job.get('title', 'job'))}.png"
+        )
+        result_page.screenshot(path=str(screenshot_file), full_page=True)
+        screenshot_path = str(screenshot_file)
+        final_apply_url = result_page.url
+
+        evidence = make_review_evidence(
+            result.snapshot,
+            application_form_opened=result.application_form_opened,
+            resume_uploaded=result.resume_uploaded,
+            final_review_detected=result.final_review_detected,
+            screenshot_path=screenshot_path,
+            timeline=result.timeline,
+        )
+        status_map = {
+            "LOGIN_REQUIRED": "login_required",
+            "CAPTCHA_DETECTED": "captcha_detected",
+            "JOB_UNAVAILABLE": "job_unavailable",
+            "UNSUPPORTED": "unsupported",
+            "MANUAL_REQUIRED": "manual_required",
+            "FAILED": "failed",
+            "ERROR": "failed",
+            "TIMEOUT": "failed",
+            "SUBMISSION_DETECTED": "submitted_user_confirmed" if submit_confirmed else "manual_required",
+        }
+        if result.status == "REVIEW_READY_CANDIDATE" and evidence.verified:
+            status = "review_ready"
+        elif result.status == "REVIEW_READY_CANDIDATE":
+            status = "verification_failed"
+            notes.append("Final submit was detected, but review-ready evidence was incomplete.")
+        elif (
+            result.status == "MANUAL_REQUIRED"
+            and result.snapshot is not None
+            and result.snapshot.page_type == "job_details"
+            and "No recognized safe action is available" in result.reason
+        ):
+            status = "entry_action_not_found"
+        elif (
+            result.status == "MANUAL_REQUIRED"
+            and result.snapshot is not None
+            and result.snapshot.page_type == "job_details"
+            and "share your profile" in result.reason
+        ):
+            status = "external_apply_confirmation_required"
+        elif (
+            result.status == "MANUAL_REQUIRED"
+            and result.snapshot is not None
+            and result.snapshot.page_type == "external_apply_started"
+        ):
+            status = "external_apply_started"
+        else:
+            status = status_map.get(result.status, "manual_required")
+
+    except Exception as error:
+        error_text = str(error)
+        # A navigation error happens before the form opens, so it is safe to
+        # retry only after the local network/browser policy is corrected.
+        status = "navigation_failed" if result is None and "Page.goto:" in error_text else "failed"
+        notes.append(error_text)
+        try:
+            final_apply_url = page.url
+        except Exception:
+            final_apply_url = ""
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
+
+    return {
+        "timestamp": now_iso(),
+        "company": job.get("company", ""),
+        "title": job.get("title", ""),
+        "location": job.get("location", ""),
+        "url": job.get("url", ""),
+        "match_score": normalized_score(job),
+        "apply_type": "browser_agent",
+        "ats": getattr(result, "ats", "unknown"),
+        "apply_url": final_apply_url,
+        "status": status,
+        "resume_uploaded": getattr(result, "resume_uploaded", False),
+        "fields_filled": getattr(result, "fields_filled", []),
+        "screenshot": screenshot_path,
+        "notes": " | ".join(notes),
+        "evidence": evidence.to_dict() if evidence is not None else {},
+    }
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Prepare top job applications safely.")
+    parser.add_argument(
+        "--confirm-submit",
+        action="store_true",
+        help="Prompt at a verified final submit control; submission happens only after typing SUBMIT.",
+    )
+    parser.add_argument(
+        "--confirm-external-apply",
+        action="store_true",
+        help="Prompt before a generic LinkedIn Apply action that may share your profile with a job poster.",
+    )
+    args = parser.parse_args(argv)
     if not JOB_RESULTS_PATH.exists():
         raise SystemExit("Missing job_results.json. Run linkedin_score_jobs.py first.")
 
     profile = load_json(APPLICATION_PROFILE_PATH, {})
     jobs = top_jobs()
     if not jobs:
-        raise SystemExit("No jobs found in job_results.json.")
+        raise SystemExit(
+            "No eligible jobs found. The apply stage only opens live postings "
+            f"scored Apply ({APPLY_SCORE}+) by discovery."
+        )
 
     existing_records = load_json(APPLICATIONS_JSON, [])
-    retryable_statuses = {
-        "apply_button_not_found",
-        "error",
-        "job_apply_redirect_lost",
-    }
     already_started = {
         record.get("url")
         for record in existing_records
         if (
-            record.get("status") not in retryable_statuses
+            not is_retryable_application_record(record)
             and not (
                 record.get("status") == "ready_for_review"
                 and not record.get("resume_uploaded")
@@ -589,7 +869,19 @@ def main() -> None:
 
     print(f"Top jobs available: {len(jobs)}")
     print(f"Pending applications this run: {len(pending_jobs)}")
-    print("The script will stop before final submission for every job.")
+
+    print(
+        "Using the evidence-based browser agent. "
+        + (
+            "Final submission requires an exact terminal confirmation."
+            if args.confirm_submit
+            else "Final submission is blocked."
+        )
+    )
+    if not args.confirm_external_apply:
+        print("Generic LinkedIn Apply requires --confirm-external-apply because it can share your profile.")
+
+    attempt_records: list[dict] = []
 
     with sync_playwright() as playwright:
         context = launch_linkedin_context(playwright)
@@ -597,8 +889,36 @@ def main() -> None:
         try:
             for index, job in enumerate(pending_jobs, start=1):
                 print(f"[{index}/{len(pending_jobs)}] Preparing {job.get('company')} - {job.get('title')}")
-                record = process_job(context, job, profile, existing_records)
+
+                record = _process_job_browser_agent(
+                    context,
+                    job,
+                    profile,
+                    existing_records,
+                    allow_user_confirmed_submit=args.confirm_submit,
+                    allow_external_apply=args.confirm_external_apply,
+                )
+
                 existing_records.append(record)
+                attempt_records.append(record)
+                append_run(
+                    {
+                        "eligible": True,
+                        "job_url": record["url"],
+                        "company": record["company"],
+                        "title": record["title"],
+                        "ats": record.get("ats", "unknown"),
+                        "started_at": record["timestamp"],
+                        "status": record["status"],
+                        "failure_reason": record["notes"] if record["status"] != "review_ready" else "",
+                        "fields_completed": record["fields_filled"],
+                        "resume_uploaded": record["resume_uploaded"],
+                        "final_review_detected": bool((record.get("evidence") or {}).get("final_review_detected")),
+                        "screenshot_path": record["screenshot"],
+                        "final_url": record["apply_url"],
+                        "evidence": record.get("evidence", {}),
+                    }
+                )
                 update_job_history(
                     job,
                     record.get("status", ""),
@@ -614,7 +934,24 @@ def main() -> None:
                 pass
 
     save_applications(existing_records)
+    metrics = write_metrics()
+    print(f"Verified review-ready rate: {metrics['overall']['verified_review_ready_rate']}%")
     print(f"Saved metadata to {APPLICATIONS_JSON} and {APPLICATIONS_CSV}")
+
+    unsuccessful = {
+        "failed",
+        "account_required",
+        "captcha_detected",
+        "manual_required",
+        "unsupported",
+        "verification_failed",
+        "job_apply_redirect_lost",
+        "job_unavailable",
+    }
+    if attempt_records and all(
+        record.get("status") in unsuccessful for record in attempt_records
+    ):
+        raise SystemExit("No application reached a reviewable state; inspect the recorded notes.")
 
 
 if __name__ == "__main__":

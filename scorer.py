@@ -13,6 +13,7 @@ from config import (
     CANDIDATE_PROFILE_PATH,
 )
 
+from agent.scoring import ScoreCalculator
 from ollama_client import generate_json
 from prompts import SCORING_PROMPT
 
@@ -123,15 +124,12 @@ def calculate_weighted_score(
 
 def validate_response(
     response: dict,
+    job: dict | None = None,
 ) -> dict:
     if not isinstance(response, dict):
         response = {}
 
-    #
-    # Normalize malformed keys
-    #
     normalized = {}
-
     for key, value in response.items():
         if isinstance(key, str):
             cleaned_key = (
@@ -147,115 +145,52 @@ def validate_response(
 
     response = normalized
 
-    print(
-        "\n========== RAW NORMALIZED RESPONSE =========="
-    )
+    print("\n========== RAW NORMALIZED RESPONSE ==========")
     print(response)
-    print(
-        "=============================================\n"
-    )
+    print("=============================================\n")
 
     reason = str(
-        response.get(
-            "reason",
-            "Qwen did not provide a reason.",
-        )
+        response.get("reason", "No reason provided.")
     ).strip()
 
-    matched_skills = response.get(
-        "matched_skills",
-        [],
-    )
+    matched_skills = response.get("matched_skills", [])
+    missing_skills = response.get("missing_skills", [])
 
-    missing_skills = response.get(
-        "missing_skills",
-        [],
-    )
-
-    if not isinstance(
-        matched_skills,
-        list,
-    ):
+    if not isinstance(matched_skills, list):
         matched_skills = []
-
-    if not isinstance(
-        missing_skills,
-        list,
-    ):
+    if not isinstance(missing_skills, list):
         missing_skills = []
 
     matched_skills = sorted(
-        {
-            str(skill).strip()
-            for skill in matched_skills
-            if str(skill).strip()
-        }
+        {str(s).strip() for s in matched_skills if str(s).strip()}
     )
-
     missing_skills = sorted(
-        {
-            str(skill).strip()
-            for skill in missing_skills
-            if str(skill).strip()
-        }
+        {str(s).strip() for s in missing_skills if str(s).strip()}
     )
 
-    validated_subscores = (
-        default_subscores()
+    # Compute score deterministically from the LLM's semantic analysis and
+    # the original job.  The prior implementation built this data from the
+    # LLM response, which intentionally does not include job metadata; that
+    # made seniority, location, leadership, domain, and growth scores mostly
+    # zero regardless of the actual posting.
+    job = job if isinstance(job, dict) else {}
+    calculator = ScoreCalculator()
+    computed = calculator.calculate(
+        llm_output={
+            "matched_skills": matched_skills,
+            "missing_skills": missing_skills,
+            "reason": reason,
+        },
+        job=job,
     )
-
-    subscores = response.get(
-        "subscores",
-        {}
-    )
-
-    if isinstance(subscores, dict):
-        cleaned = {}
-
-        for key, value in subscores.items():
-            if isinstance(key, str):
-                cleaned_key = (
-                    key.replace("\n", "")
-                    .replace("\r", "")
-                    .strip()
-                    .strip('"')
-                    .strip("'")
-                )
-                cleaned[cleaned_key] = value
-            else:
-                cleaned[key] = value
-
-        for key in validated_subscores:
-            validated_subscores[key] = (
-                normalize_subscore(
-                    cleaned.get(key, 0),
-                    SCORING_WEIGHTS[key],
-                )
-            )
-
-    #
-    # Prefer the model's explicit 0-100 score. Use subscores only as a fallback
-    # because local models sometimes produce category totals that do not match
-    # their final recommendation.
-    #
-    score = normalize_score(
-        response.get("score", 0)
-    )
-
-    if score == 0:
-        score = calculate_weighted_score(
-            validated_subscores
-        )
 
     return {
-        "score": score,
-        "status": determine_status(
-            score
-        ),
-        "reason": reason,
-        "matched_skills": matched_skills,
-        "missing_skills": missing_skills,
-        "subscores": validated_subscores,
+        "score": computed["score"],
+        "status": computed["status"],
+        "reason": computed["reason"],
+        "matched_skills": computed["matched_skills"],
+        "missing_skills": computed["missing_skills"],
+        "subscores": computed["subscores"],
     }
 
 
@@ -266,17 +201,11 @@ def score_job(
 
     response = generate_json(prompt)
 
-    print(
-        "\n========== RAW QWEN RESPONSE =========="
-    )
+    print("\n========== RAW QWEN RESPONSE ==========")
     print(response)
-    print(
-        "=======================================\n"
-    )
+    print("=======================================\n")
 
-    return validate_response(
-        response
-    )
+    return validate_response(response, job)
 
 
 def clear_profile_cache():

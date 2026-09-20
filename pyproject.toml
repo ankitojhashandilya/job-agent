@@ -53,8 +53,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ankit-shandilya/job-agent"
-Source = "https://github.com/ankit-shandilya/job-agent"
+Homepage = "https://github.com/ankitojhashandilya/job-agent"
+Source = "https://github.com/ankitojhashandilya/job-agent"
 
 [tool.ruff]
 line-length = 100
