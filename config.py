@@ -256,6 +256,7 @@ class Settings:
             google_sheet_name=_env_str("JOB_AGENT_SHEET_NAME", "Job Tracker"),
             ollama_url=_env_str("OLLAMA_URL", "http://localhost:11434/api/generate"),
             ollama_model=_env_str("OLLAMA_MODEL", "qwen3:8b"),
+            ollama_timeout=_env_int("OLLAMA_TIMEOUT", 180),
             search_location=_env_str("JOB_AGENT_SEARCH_LOCATION", "India"),
             job_limit=_env_int("JOB_AGENT_JOB_LIMIT", 25),
             apply_score=_env_int("JOB_AGENT_APPLY_SCORE", 75),

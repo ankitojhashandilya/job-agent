@@ -466,6 +466,21 @@ LinkedIn's DOM changes frequently. If descriptions are consistently empty, the C
 python linkedin_extract_test.py
 ```
 
+### Discovery returns zero jobs through AI Assistant
+
+AI Assistant runs the checkout configured by `JOB_AGENT_DIR`; its Direct Job
+Command uses `discovery.py` before `apply_top_jobs.py`. Search supports both
+classic LinkedIn cards and the component-based cards without job links.
+Discovery waits for rendered results and distinguishes an explicit empty search
+from sign-in, verification, and unreadable/loading pages. A source failure is
+reported as an error and does not replace previous result exports with `[]`.
+
+AI Assistant's `OLLAMA_URL` may point to `/api/chat`. The job-agent client
+supports both that endpoint and the standalone `/api/generate` default.
+It also honors `OLLAMA_TIMEOUT`, including AI Assistant's longer model timeout.
+After discovery succeeds, run `apply top jobs`; the apply stage requires jobs
+scored `Apply` at the configured threshold.
+
 ### Application forms are not filling
 
 The production path is `apply_top_jobs.py` → `agent/agent.py`. The observer

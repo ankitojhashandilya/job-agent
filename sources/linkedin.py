@@ -1,8 +1,7 @@
 """LinkedIn job-source plugin.
 
-Relocated from ``linkedin_score_jobs.py``. The scraping functions in this
-module are byte-for-byte identical to the originals; only their home
-module changed. They contain **only** browser automation — no scoring,
+Relocated from ``linkedin_score_jobs.py``. Search supports both classic
+cards and the current component-based layout. It contains only browser automation — no scoring,
 no history writing, no persistence. Scoring, history, and persistence live
 in ``discovery.py``/the caller.
 
@@ -12,11 +11,12 @@ API and pipeline continue working unchanged.
 
 from __future__ import annotations
 
-from urllib.parse import quote_plus, urlsplit, urlunsplit
 from typing import Any
+from urllib.parse import quote_plus, urlsplit, urlunsplit
 
 from playwright.sync_api import Error, TimeoutError, sync_playwright
 
+from browser.linkedin_search import read_search_results
 from browser_session import launch_linkedin_context
 from config import (
     JOB_LIMIT,
@@ -92,19 +92,13 @@ def description_from_visible_text(page) -> str:
     ]
 
     end_positions = [
-        description.find(marker)
-        for marker in end_markers
-        if description.find(marker) > 0
+        description.find(marker) for marker in end_markers if description.find(marker) > 0
     ]
 
     if end_positions:
         description = description[: min(end_positions)]
 
-    lines = [
-        line.strip()
-        for line in description.splitlines()
-        if line.strip()
-    ]
+    lines = [line.strip() for line in description.splitlines() if line.strip()]
 
     return "\n".join(lines).strip()
 
@@ -121,70 +115,7 @@ def collect_search_results(
         timeout=60000,
     )
 
-    page.wait_for_timeout(5000)
-
-    jobs = page.evaluate(
-        """
-        (limit) => {
-            const cards = [...document.querySelectorAll(
-                'li.scaffold-layout__list-item, li.jobs-search-results__list-item, .job-card-container'
-            )];
-
-            const seen = new Set();
-            const results = [];
-
-            for (const card of cards) {
-                const link = card.querySelector(
-                    'a.job-card-list__title--link, a[href*="/jobs/view/"]'
-                );
-
-                if (!link || seen.has(link.href)) {
-                    continue;
-                }
-
-                seen.add(link.href);
-
-                const titleNode = link.querySelector('strong') || link;
-
-                const title = titleNode.innerText
-                    .split('\\n')[0]
-                    .replace(/\\s+with verification$/i, '')
-                    .trim();
-
-                const company = (
-                    card.querySelector(
-                        '.artdeco-entity-lockup__subtitle span,' +
-                        '.job-card-container__primary-description,' +
-                        '.job-card-container__company-name'
-                    )?.innerText || ''
-                ).trim();
-
-                const location = (
-                    card.querySelector(
-                        '.artdeco-entity-lockup__caption,' +
-                        '.job-card-container__metadata-item'
-                    )?.innerText || ''
-                ).trim();
-
-                if (title) {
-                    results.push({
-                        title,
-                        company,
-                        location,
-                        url: link.href
-                    });
-                }
-
-                if (results.length >= limit) {
-                    break;
-                }
-            }
-
-            return results;
-        }
-        """,
-        limit,
-    )
+    jobs = read_search_results(page, limit)
 
     for job in jobs:
         job["url"] = clean_url(job["url"])
@@ -214,10 +145,7 @@ def collect_all_search_results(
             location,
         )
 
-        print(
-            f"Found {len(keyword_jobs)} raw jobs "
-            f"for keyword: {keyword}"
-        )
+        print(f"Found {len(keyword_jobs)} raw jobs for keyword: {keyword}")
 
         for job in keyword_jobs:
             if job["url"] in seen_urls:
@@ -406,11 +334,7 @@ class LinkedInSource(JobSource):
         with sync_playwright() as playwright:
             context = launch_linkedin_context(playwright)
 
-            search_page = (
-                context.pages[0]
-                if context.pages
-                else context.new_page()
-            )
+            search_page = context.pages[0] if context.pages else context.new_page()
             detail_page = context.new_page()
 
             try:
@@ -424,10 +348,7 @@ class LinkedInSource(JobSource):
                 print(f"Found {len(summaries)} jobs.")
 
                 for index, summary in enumerate(summaries, start=1):
-                    print(
-                        f"[{index}/{len(summaries)}] "
-                        f"Reading {summary['title']}..."
-                    )
+                    print(f"[{index}/{len(summaries)}] Reading {summary['title']}...")
 
                     try:
                         detail = load_job_details(detail_page, summary)

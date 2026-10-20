@@ -1,4 +1,3 @@
-
 # ollama_client.py
 
 import json
@@ -6,6 +5,7 @@ import re
 import time
 import urllib.request
 from urllib.error import URLError
+from urllib.parse import urlsplit
 
 from config import (
     OLLAMA_MODEL,
@@ -28,13 +28,7 @@ def _clean_keys(obj):
 
         for key, value in obj.items():
             if isinstance(key, str):
-                new_key = (
-                    key.replace("\n", "")
-                    .replace("\r", "")
-                    .strip()
-                    .strip('"')
-                    .strip("'")
-                )
+                new_key = key.replace("\n", "").replace("\r", "").strip().strip('"').strip("'")
             else:
                 new_key = key
 
@@ -78,13 +72,9 @@ def _parse_json_response(text: str) -> dict:
         end = text.rfind("}")
 
         if start == -1 or end == -1:
-            raise ValueError(
-                f"Qwen did not return JSON:\n{text}"
-            )
+            raise ValueError(f"Qwen did not return JSON:\n{text}")
 
-        data = json.loads(
-            text[start : end + 1]
-        )
+        data = json.loads(text[start : end + 1])
 
     return _clean_keys(data)
 
@@ -105,6 +95,13 @@ def generate_json(
         "format": "json",
         "options": OLLAMA_OPTIONS,
     }
+    # AI Assistant shares its /api/chat configuration with child processes.
+    # Ollama's chat endpoint requires messages and returns message.content;
+    # the standalone job-agent default uses /api/generate and response.
+    is_chat = urlsplit(OLLAMA_URL).path.rstrip("/").endswith("/api/chat")
+    if is_chat:
+        payload.pop("prompt")
+        payload["messages"] = [{"role": "user", "content": prompt}]
 
     last_error = None
 
@@ -115,56 +112,37 @@ def generate_json(
         try:
             request = urllib.request.Request(
                 OLLAMA_URL,
-                data=json.dumps(payload).encode(
-                    "utf-8"
-                ),
-                headers={
-                    "Content-Type": "application/json"
-                },
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
             )
 
             with urllib.request.urlopen(
                 request,
                 timeout=OLLAMA_TIMEOUT,
             ) as response:
-                result = json.loads(
-                    response.read().decode(
-                        "utf-8"
-                    )
-                )
+                result = json.loads(response.read().decode("utf-8"))
 
-            raw_response = result.get(
-                "response",
-                ""
+            raw_response = (
+                (result.get("message") or {}).get("content", "")
+                if is_chat
+                else result.get("response", "")
             )
 
             #
             # Debug
             #
-            print(
-                "\n========== RAW OLLAMA =========="
-            )
-            print(
-                raw_response[:1500]
-            )
-            print(
-                "\n================================\n"
-            )
+            print("\n========== RAW OLLAMA ==========")
+            print(raw_response[:1500])
+            print("\n================================\n")
 
-            parsed = _parse_json_response(
-                raw_response
-            )
+            parsed = _parse_json_response(raw_response)
 
             #
             # Debug
             #
-            print(
-                "========== PARSED JSON =========="
-            )
+            print("========== PARSED JSON ==========")
             print(parsed)
-            print(
-                "=================================\n"
-            )
+            print("=================================\n")
 
             return parsed
 
@@ -176,17 +154,10 @@ def generate_json(
         ) as error:
             last_error = error
 
-            print(
-                f"[Ollama] Attempt "
-                f"{attempt}/{retries} failed:"
-            )
+            print(f"[Ollama] Attempt {attempt}/{retries} failed:")
             print(error)
 
             if attempt < retries:
                 time.sleep(2)
 
-    raise RuntimeError(
-        f"Ollama failed after "
-        f"{retries} attempts.\n"
-        f"Last error: {last_error}"
-    )
+    raise RuntimeError(f"Ollama failed after {retries} attempts.\nLast error: {last_error}")
