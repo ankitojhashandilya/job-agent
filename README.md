@@ -468,7 +468,26 @@ python linkedin_extract_test.py
 
 ### Application forms are not filling
 
-The autofill in `apply_top_jobs.py` uses heuristic label matching (`label_text_for_input`, `value_for_label`). If a field is not being filled, the form likely uses a non-standard label or input type. Check `application_screenshots/` for visual confirmation.
+The production path is `apply_top_jobs.py` → `agent/agent.py`. The observer
+focuses on the active dialog or application form, and shares the original
+control locators with the executor so duplicate labels and punctuation do not
+change the target. Native dropdowns match configured answers against both
+option labels and values; accessible comboboxes and radio groups are supported.
+Hidden resume inputs can be filled when their containing step is visible.
+
+The loop re-observes after each action, retries transient failures, and stops
+after three actions without observable progress. Longer forms have an
+80-iteration budget. Unknown required answers and unresolved validation still
+need human review. Check `application_screenshots/` and the saved action
+timeline to locate the blocked step.
+
+The regression suite includes local Chromium application pages with multiple
+steps, delayed dropdown options, duplicate labels, hidden uploads, and recovery
+after re-rendering. It never applies to live jobs:
+
+```powershell
+.\venv\Scripts\python.exe -m pytest -q
+```
 
 ### Scores are all 0
 

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from typing import Any
 
 from playwright.sync_api import Locator, Page
-
 
 # ── ID prefix constants ───────────────────────────────────────────
 
@@ -15,6 +15,7 @@ UPLOAD_PREFIX = "upload:"
 
 
 # ── Pure helpers (no Playwright dependency) ───────────────────────
+
 
 def slugify(text: str) -> str:
     slug = text.lower().strip()
@@ -45,6 +46,7 @@ def _make_unique_id(candidate_id: str, used_ids: set[str]) -> str:
 
 
 # ── Candidate ID generation (used during observation) ────────────
+
 
 def _candidate_field_id(element: Any, label: str, field_type: str) -> str:
     if label:
@@ -89,6 +91,7 @@ def _candidate_file_id(label: str) -> str:
 
 # ── ElementResolver ───────────────────────────────────────────────
 
+
 class ElementResolver:
     """Bidirectional resolver between semantic IDs and DOM elements.
 
@@ -112,6 +115,35 @@ class ElementResolver:
 
     def reset(self) -> None:
         self._used_ids.clear()
+        if hasattr(self, "_page"):
+            self._page._job_agent_targets = {}
+
+    def remember(self, target: str, locator: Locator) -> None:
+        """Share the observed locator with the executor without changing the DOM.
+
+        IDs remain human-readable for policy checks, while their original
+        locators retain case, punctuation, scope and duplicate-field identity.
+        A new observation replaces this registry before the next action.
+        """
+        if not hasattr(self, "_page"):
+            return
+        targets = getattr(self._page, "_job_agent_targets", None)
+        if not isinstance(targets, dict):
+            targets = {}
+            self._page._job_agent_targets = targets
+        try:
+            dom_id = locator.get_attribute("id", timeout=300)
+            if isinstance(dom_id, str) and dom_id:
+                exact = self._page.locator(f"[id={json.dumps(dom_id)}]")
+                if exact.count() == 1:
+                    locator = exact
+        except Exception:
+            pass
+        targets[target] = locator
+
+    def _observed(self, target: str) -> Locator | None:
+        targets = getattr(self._page, "_job_agent_targets", None)
+        return targets.get(target) if isinstance(targets, dict) else None
 
     # ── Generation ─────────────────────────────────────────────
 
@@ -119,6 +151,7 @@ class ElementResolver:
         candidate = _candidate_field_id(element, label, field_type)
         unique = _make_unique_id(candidate, self._used_ids)
         self._used_ids.add(unique)
+        self.remember(unique, element)
         return unique
 
     def button_id(self, text: str) -> str:
@@ -140,6 +173,9 @@ class ElementResolver:
     # to a best-guess element.
 
     def resolve_field(self, field_id: str) -> Locator | None:
+        observed = self._observed(field_id)
+        if observed is not None:
+            return observed
         slug = field_id.split(":", 1)[1] if ":" in field_id else field_id
         label_text = slug.replace("_", " ")
 
@@ -192,6 +228,9 @@ class ElementResolver:
         return None
 
     def resolve_button(self, button_id: str) -> Locator | None:
+        observed = self._observed(button_id)
+        if observed is not None:
+            return observed
         slug = button_id.split(":", 1)[1] if ":" in button_id else button_id
         label_text = slug.replace("_", " ")
 
@@ -223,18 +262,17 @@ class ElementResolver:
         return None
 
     def resolve_file(self, file_id: str) -> Locator | None:
+        observed = self._observed(file_id)
+        if observed is not None:
+            return observed
         slug = file_id.split(":", 1)[1] if ":" in file_id else file_id
         label_text = slug.replace("_", " ")
 
         # 1. aria-label
-        loc = self._try_selector(
-            f"input[type='file'][aria-label='{slug}']"
-        )
+        loc = self._try_selector(f"input[type='file'][aria-label='{slug}']")
         if loc is not None:
             return loc
-        loc = self._try_selector(
-            f"input[type='file'][aria-label='{label_text}']"
-        )
+        loc = self._try_selector(f"input[type='file'][aria-label='{label_text}']")
         if loc is not None:
             return loc
 
@@ -252,18 +290,14 @@ class ElementResolver:
             try:
                 for_id = label_el.get_attribute("for")
                 if for_id:
-                    loc = self._page.locator(
-                        f"input[type='file']#{for_id}"
-                    ).first
+                    loc = self._page.locator(f"input[type='file']#{for_id}").first
                     if loc.count():
                         return loc
             except Exception:
                 pass
 
         # 4. Partial aria-label (case-insensitive)
-        loc = self._try_selector(
-            f"input[type='file'][aria-label*='{label_text}' i]"
-        )
+        loc = self._try_selector(f"input[type='file'][aria-label*='{label_text}' i]")
         if loc is not None:
             return loc
 

@@ -7,6 +7,7 @@ workflows and the new AI agent's perception layer.
 
 from __future__ import annotations
 
+import json
 from urllib.parse import urlparse
 
 from playwright.sync_api import Locator, Page
@@ -17,8 +18,10 @@ def label_text_for_input(field: Locator) -> str:
 
     Tries, in order:
     1. aria-label attribute
-    2. placeholder attribute
-    3. Associated <label for="..."> element
+    2. aria-labelledby references
+    3. Native associated labels (including wrapping labels)
+    4. placeholder attribute
+    5. Associated <label for="..."> element as a compatibility fallback
 
     Args:
         field: A Playwright Locator pointing to a single form element.
@@ -31,6 +34,28 @@ def label_text_for_input(field: Locator) -> str:
         aria = field.get_attribute("aria-label", timeout=1000)
         if aria:
             return aria
+    except Exception:
+        pass
+
+    try:
+        labelled_by = field.get_attribute("aria-labelledby", timeout=1000)
+        if labelled_by:
+            labels = [
+                field.page.locator(f"[id={json.dumps(identifier)}]").inner_text(timeout=1000)
+                for identifier in labelled_by.split()
+            ]
+            if " ".join(labels).strip():
+                return " ".join(labels).strip()
+    except Exception:
+        pass
+
+    try:
+        # Native labels also cover wrapping <label><input ...></label>.
+        label = field.evaluate(
+            "el => Array.from(el.labels || []).map(x => x.innerText).join(' ').trim()"
+        )
+        if isinstance(label, str) and label:
+            return label
     except Exception:
         pass
 
@@ -74,10 +99,7 @@ def classify_page_state(page: Page) -> str:
     except Exception:
         return "unknown"
 
-    if any(
-        needle in text
-        for needle in ["sign in", "login", "log in", "create account"]
-    ):
+    if any(needle in text for needle in ["sign in", "login", "log in", "create account"]):
         return "account_required"
 
     if any(

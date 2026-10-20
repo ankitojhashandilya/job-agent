@@ -60,6 +60,7 @@ def redacted_snapshot(snapshot: PageSnapshot) -> dict[str, object]:
                 "required": field.required,
                 "filled": bool(field.value),
                 "interactable": field.interactable,
+                "invalid": field.invalid,
             }
             for field in snapshot.fields
         ],
@@ -94,13 +95,19 @@ def make_review_evidence(
     """Build privacy-safe evidence from the final observation and actions."""
     if snapshot is None:
         return ReviewEvidence(
-            False, False, False, resume_uploaded, False, final_review_detected,
-            screenshot_path, "", {}, (),
+            False,
+            False,
+            False,
+            resume_uploaded,
+            False,
+            final_review_detected,
+            screenshot_path,
+            "",
+            {},
+            (),
         )
     resume_required = any(upload.required for upload in snapshot.file_inputs)
-    required_fields_completed = all(
-        field.value or not field.required for field in snapshot.fields
-    )
+    required_fields_completed = all(field.value or not field.required for field in snapshot.fields)
     safe_timeline = tuple(
         {
             "action": item.action,
@@ -114,7 +121,8 @@ def make_review_evidence(
         required_fields_completed=required_fields_completed,
         resume_required=resume_required,
         resume_uploaded=resume_uploaded,
-        validation_clear=not snapshot.error_messages,
+        validation_clear=not snapshot.error_messages
+        and not any(field.invalid for field in snapshot.fields),
         final_review_detected=final_review_detected,
         screenshot_path=screenshot_path,
         final_url=snapshot.url,

@@ -8,7 +8,6 @@ from agent.execute import BrowserAction, BrowserCommand
 from agent.layout_fallback import FieldLayoutFallback
 from agent.types import PageSnapshot, TaskInfo
 
-
 _FIELD_KEYS: dict[str, tuple[str, ...]] = {
     "first_name": ("first name", "given name", "forename"),
     "last_name": ("last name", "family name", "surname"),
@@ -56,7 +55,9 @@ class RuleBasedPlanner:
         # this planner domain-agnostic so deterministic field/form behaviour
         # can be exercised independently with fixture domains.
         if page_case is ApplicationCase.UNKNOWN_LAYOUT:
-            return self._review(None, f"Unsupported or unknown application layout: {page_case.value}")
+            return self._review(
+                None, f"Unsupported or unknown application layout: {page_case.value}"
+            )
 
         assessment = assess_ats(snapshot)
         if page_case is ApplicationCase.LINKEDIN_ENTRY:
@@ -75,12 +76,13 @@ class RuleBasedPlanner:
                     return BrowserCommand(BrowserAction.CLICK_BUTTON, target=button.id)
             return self._review(
                 None,
-                "LinkedIn recorded the profile share, but no supported Workday or Greenhouse destination was found.",
+                "LinkedIn recorded the profile share, but no supported Workday "
+                "or Greenhouse destination was found.",
             )
 
         candidate = (self._task.candidate if self._task else {}) or {}
         for field in snapshot.fields:
-            if field.value or not field.interactable:
+            if (field.value and not field.invalid) or not field.interactable:
                 continue
             candidate_key = self._match_label(field.label, candidate)
             if not candidate_key and self._layout_fallback:
@@ -90,13 +92,23 @@ class RuleBasedPlanner:
             value = str(candidate[candidate_key]).strip()
             if not value:
                 continue
+            if field.invalid and field.value == value:
+                return self._review(field.id, f"The configured answer was rejected: {field.label}")
             if field.field_type in {"checkbox", "radio"}:
                 if self._is_truthy(value):
-                    return BrowserCommand(BrowserAction.CHECK_CHECKBOX, target=field.id, value=value)
+                    return BrowserCommand(
+                        BrowserAction.CHECK_CHECKBOX, target=field.id, value=value
+                    )
                 if field.required:
-                    return self._review(field.id, f"Required boolean needs confirmation: {field.label}")
+                    return self._review(
+                        field.id, f"Required boolean needs confirmation: {field.label}"
+                    )
                 continue
-            action = BrowserAction.SELECT_OPTION if field.field_type == "select" else BrowserAction.FILL_FIELD
+            action = (
+                BrowserAction.SELECT_OPTION
+                if field.field_type in {"select", "combobox", "radio_group"}
+                else BrowserAction.FILL_FIELD
+            )
             return BrowserCommand(action, target=field.id, value=value)
 
         required_unknown = next(
@@ -110,15 +122,21 @@ class RuleBasedPlanner:
         if required_unknown is not None:
             return self._review(
                 required_unknown.id,
-                f"Required question needs a human answer: {required_unknown.label or required_unknown.id}",
+                "Required question needs a human answer: "
+                f"{required_unknown.label or required_unknown.id}",
             )
+
+        if snapshot.error_messages or any(field.invalid for field in snapshot.fields):
+            return self._review(None, "Form validation needs a human answer or correction.")
 
         for upload in snapshot.file_inputs:
             if upload.has_file or not upload.interactable:
                 continue
             if not self._task or not self._task.resume_path:
                 return self._review(upload.id, "A required resume upload has no configured file.")
-            return BrowserCommand(BrowserAction.UPLOAD_FILE, target=upload.id, value=self._task.resume_path)
+            return BrowserCommand(
+                BrowserAction.UPLOAD_FILE, target=upload.id, value=self._task.resume_path
+            )
 
         # The safety layer blocks final controls before Executor can click them.
         for button in snapshot.buttons:
@@ -143,7 +161,10 @@ class RuleBasedPlanner:
             if any(alias in normalized for alias in aliases):
                 if key in candidate:
                     return key
-                for alternate in (f"work_{key}", key.replace("authorization", "work_authorization")):
+                for alternate in (
+                    f"work_{key}",
+                    key.replace("authorization", "work_authorization"),
+                ):
                     if alternate in candidate:
                         return alternate
         for key in candidate:

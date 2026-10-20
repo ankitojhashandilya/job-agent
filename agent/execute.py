@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import json
+import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any
 
 from playwright.sync_api import Locator, Page
 
 from agent.resolver import ElementResolver
 
-
 # ── Enum ───────────────────────────────────────────────────────────
+
 
 class BrowserAction(Enum):
     FILL_FIELD = "fill_field"
@@ -25,6 +26,7 @@ class BrowserAction(Enum):
 
 # ── Data models ────────────────────────────────────────────────────
 
+
 @dataclass
 class BrowserCommand:
     action: BrowserAction
@@ -34,9 +36,7 @@ class BrowserCommand:
 
     def __post_init__(self) -> None:
         if not isinstance(self.action, BrowserAction):
-            raise TypeError(
-                f"action must be a BrowserAction enum, got {type(self.action)}"
-            )
+            raise TypeError(f"action must be a BrowserAction enum, got {type(self.action)}")
 
 
 @dataclass
@@ -55,6 +55,7 @@ _SUPPORTED_ACTIONS: frozenset[str] = frozenset(e.value for e in BrowserAction)
 
 
 # ── Executor ───────────────────────────────────────────────────────
+
 
 class Executor:
     """Deterministic browser action executor.
@@ -184,7 +185,7 @@ class Executor:
             success=True,
             action=command.action.value,
             target=command.target,
-            message=f"Filled '{target_text}' with '{command.value}'",
+            message=f"Filled '{target_text}'",
             duration_ms=0,
         )
 
@@ -202,16 +203,21 @@ class Executor:
             )
 
         pages_before = self._context_pages()
+        previous_url = self._page.url
         locator.click(timeout=command.timeout_ms)
 
         # Company application links commonly open a new tab. Adopt only that
         # page; the agent re-evaluates the ATS capability before doing
         # anything else on it.
-        try:
-            self._page.wait_for_timeout(400)
-        except Exception:
-            pass
-        new_pages = [page for page in self._context_pages() if page not in pages_before]
+        new_pages = []
+        for _ in range(15):
+            try:
+                self._page.wait_for_timeout(100)
+            except Exception:
+                break
+            new_pages = [page for page in self._context_pages() if page not in pages_before]
+            if new_pages or self._page.url != previous_url:
+                break
         if new_pages:
             self._page = new_pages[-1]
             self._resolver = ElementResolver(self._page)
@@ -288,15 +294,99 @@ class Executor:
                 duration_ms=0,
             )
 
-        locator.select_option(command.value or "", timeout=command.timeout_ms)
+        value = command.value or ""
+        kind = locator.evaluate("el => el.tagName.toLowerCase()")
+        role = locator.get_attribute("role")
+        if role == "combobox":
+            self._select_combobox(locator, value, command.timeout_ms)
+        elif role == "radiogroup":
+            option = locator.get_by_role(
+                "radio", name=re.compile(rf"^\s*{re.escape(value)}\s*$", re.I)
+            )
+            if option.count() != 1:
+                raise ValueError("Radio answer did not match exactly one option")
+            option.click(timeout=command.timeout_ms)
+        elif kind == "input" and locator.get_attribute("type") == "radio":
+            name = locator.get_attribute("name")
+            root = locator.locator(
+                "xpath=ancestor::*[self::form or self::dialog or @role='dialog' "
+                "or self::main or @role='main'][1]"
+            )
+            if not root.count():
+                root = self._page
+            radios = root.locator(f'input[type="radio"][name={json.dumps(name)}]')
+            matches = []
+            for index in range(radios.count()):
+                radio = radios.nth(index)
+                label = radio.evaluate(
+                    "el => Array.from(el.labels || []).map(x => x.textContent.trim()).join(' ') "
+                    "|| el.getAttribute('aria-label') || ''"
+                )
+                if value.casefold() in {
+                    (radio.get_attribute("value") or "").casefold(),
+                    label.casefold(),
+                }:
+                    matches.append(radio)
+            if len(matches) != 1:
+                raise ValueError("Radio answer did not match exactly one option")
+            matches[0].check(timeout=command.timeout_ms)
+        elif kind == "select":
+            options = locator.locator("option").evaluate_all(
+                "els => els.filter(x => !x.disabled).map(x => "
+                "({value:x.value, label:x.textContent.trim()}))"
+            )
+            matches = [
+                option
+                for option in options
+                if value.casefold() in {option["value"].casefold(), option["label"].casefold()}
+            ]
+            if len(matches) != 1:
+                raise ValueError("Dropdown answer did not match exactly one enabled option")
+            locator.select_option(matches[0]["value"], timeout=command.timeout_ms)
+        else:
+            # Compatibility for callers supplying their own locator wrappers.
+            locator.select_option(value, timeout=command.timeout_ms)
 
         return ExecutionResult(
             success=True,
             action=command.action.value,
             target=command.target,
-            message=f"Selected '{command.value}' in '{target_text}'",
+            message=f"Selected answer in '{target_text}'",
             duration_ms=0,
         )
+
+    def _select_combobox(self, locator: Locator, value: str, timeout_ms: int) -> None:
+        editable = locator.evaluate(
+            "el => (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.readOnly"
+        )
+        original = locator.input_value(timeout=timeout_ms) if editable else ""
+        try:
+            locator.click(timeout=timeout_ms)
+            if editable:
+                locator.fill(value, timeout=timeout_ms)
+            controls = locator.get_attribute("aria-controls") or locator.get_attribute("aria-owns")
+            if controls:
+                popup = self._page.locator(f"[id={json.dumps(controls.split()[0])}]")
+            else:
+                popup = self._page.locator("[role='listbox']:visible")
+            option = popup.get_by_role(
+                "option", name=re.compile(rf"^\s*{re.escape(value)}\s*$", re.I)
+            )
+            option.first.wait_for(state="visible", timeout=timeout_ms)
+            if option.count() != 1:
+                raise ValueError("Combobox answer did not match exactly one option")
+            option.click(timeout=timeout_ms)
+            locator.press("Tab", timeout=timeout_ms)
+        except Exception:
+            # Search text is not a committed answer. A failed option lookup
+            # must not masquerade as a completed field on the next observation.
+            if editable:
+                try:
+                    locator.fill(original, timeout=timeout_ms)
+                    locator.press("Escape", timeout=timeout_ms)
+                except Exception:
+                    pass
+            raise
 
     def _execute_checkbox(self, command: BrowserCommand) -> ExecutionResult:
         target_text = command.target or ""
@@ -319,8 +409,7 @@ class Executor:
             success=True,
             action=command.action.value,
             target=command.target,
-            message=f"Checkbox '{target_text}' "
-            f"{'already checked' if is_checked else 'checked'}",
+            message=f"Checkbox '{target_text}' {'already checked' if is_checked else 'checked'}",
             duration_ms=0,
         )
 

@@ -8,13 +8,13 @@ from typing import Any
 
 from playwright.sync_api import Page
 
+from agent.dom import interaction_scope
 from agent.resolver import ElementResolver
 from agent.types import Button, FileInput, FormField, PageSnapshot
 from browser.extraction import (
     classify_page_state,
     label_text_for_input,
 )
-
 
 # ── Constants ──────────────────────────────────────────────────────
 
@@ -71,64 +71,71 @@ def _is_linkedin_progress_notice(text: str) -> bool:
         )
     )
 
+
 _FIELD_SELECTORS: dict[str, str] = {
-    "input": "input:not([type='hidden']):not([type='submit']):not([type='reset']):not([type='button'])",
+    "input": (
+        "input:not([type='hidden']):not([type='file']):not([type='submit'])"
+        ":not([type='reset']):not([type='button'])"
+    ),
     "textarea": "textarea",
     "select": "select",
+    "combobox": "[role='combobox']:not(input):not(select)",
+    "radio_group": "[role='radiogroup']",
 }
 
-_IGNORED_BUTTON_TEXTS: frozenset[str] = frozenset({
-    # Accessibility / navigation chrome
-    "skip to main content",
-    "skip to search",
-    "skip to content",
-    "keyboard shortcuts",
-    "accessibility",
-    # Global navigation
-    "messaging",
-    "notifications",
-    "notifications",
-    "profile",
-    "network",
-    "jobs",
-    "home",
-    "my items",
-    # Social / sharing
-    "share",
-    "share profile",
-    "follow",
-    "like",
-    "comment",
-    "send",
-    "report",
-    # Pagination
-    "previous",
-    "next",
-    "page",
-    "pagination",
-    # Filter / sort
-    "sort by",
-    "sort",
-    "filter",
-    "clear all",
-    "show results",
-    # Search results chrome
-    "search",
-    "search this page",
-    "advanced search",
-    "save search",
-    # View controls
-    "grid view",
-    "list view",
-    "map view",
-    "view details",
-    "expand all",
-    "collapse all",
-})
+_IGNORED_BUTTON_TEXTS: frozenset[str] = frozenset(
+    {
+        # Accessibility / navigation chrome
+        "skip to main content",
+        "skip to search",
+        "skip to content",
+        "keyboard shortcuts",
+        "accessibility",
+        # Global navigation
+        "messaging",
+        "notifications",
+        "notifications",
+        "profile",
+        "network",
+        "jobs",
+        "home",
+        "my items",
+        # Social / sharing
+        "share",
+        "share profile",
+        "follow",
+        "like",
+        "comment",
+        "send",
+        "report",
+        # Pagination
+        "previous",
+        "page",
+        "pagination",
+        # Filter / sort
+        "sort by",
+        "sort",
+        "filter",
+        "clear all",
+        "show results",
+        # Search results chrome
+        "search",
+        "search this page",
+        "advanced search",
+        "save search",
+        # View controls
+        "grid view",
+        "list view",
+        "map view",
+        "view details",
+        "expand all",
+        "collapse all",
+    }
+)
 
 _IGNORED_BUTTON_REGEX = re.compile(
     r"^\s*\d+\s*(of|/)\s*\d+\s*$"  # "1 of 10", "1/10"
-    r"|^\s*\d+\s*$"                  # bare page number
+    r"|^\s*\d+\s*$"  # bare page number
     r"|^items per page",
     re.IGNORECASE,
 )
@@ -146,6 +153,7 @@ _NAV_LANDMARK_SELECTORS = [
 
 # ── Navigation-landmark detection ─────────────────────────────────
 
+
 def _is_inside_nav_landmark(element: Any) -> bool:
     """Check whether *element* (a Playwright Locator) sits inside a
     ``<nav>``, ``<header>``, ``<footer>``, ``[role="navigation"]``,
@@ -156,27 +164,22 @@ def _is_inside_nav_landmark(element: Any) -> bool:
     Returns:
         ``True`` if the element is inside any of those landmarks.
     """
-    for selector in _NAV_LANDMARK_SELECTORS:
-        try:
-            inside = element.page.evaluate(
-                """(element, sel) => {
-                    let el = element;
-                    while (el && el !== document.body) {
-                        if (el.matches(sel)) return true;
-                        el = el.parentElement;
-                    }
-                    return false;
-                }""",
-                arg=[element.element_handle(), selector],
+    try:
+        return (
+            element.evaluate(
+                """(el, selectors) => Boolean(el.closest(selectors)) &&
+                !el.closest('form, dialog, [role=dialog]')""",
+                arg=", ".join(_NAV_LANDMARK_SELECTORS),
             )
-            if inside:
-                return True
-        except Exception:
-            continue
+            is True
+        )
+    except Exception:
+        pass
     return False
 
 
 # ── Button filtering ──────────────────────────────────────────────
+
 
 def _is_ignored_button(text: str) -> bool:
     text_lower = text.strip().lower()
@@ -191,7 +194,8 @@ def _is_ignored_button(text: str) -> bool:
 
 # ── Page type classification ──────────────────────────────────────
 
-def _classify_page_type(page: Page, legacy_state: str) -> str:
+
+def _classify_page_type(page: Page, legacy_state: str, scope=None) -> str:
     """Classify the page into a generic type using DOM heuristics.
 
     Classification order (first match wins):
@@ -214,6 +218,37 @@ def _classify_page_type(page: Page, legacy_state: str) -> str:
         application keywords, but no search signals.
     11. **unknown** — none of the above.
     """
+
+    scope = scope if scope is not None else page
+    # An open application modal wins over the job URL and its header search.
+    # Do not mistake incidental sign-in links outside that modal for a wall.
+    if scope is not page:
+        try:
+            scoped_text = scope.inner_text(timeout=1000).lower()
+            if any(needle in scoped_text for needle in _CAPTCHA_PATTERNS):
+                return "captcha_detected"
+            if scope.locator("input[type='password']:visible").count():
+                return "login_required"
+            auth_buttons = scope.get_by_role(
+                "button", name=re.compile(r"^(sign in|log in|login|create account|sign up)\b", re.I)
+            )
+            if auth_buttons.count() and auth_buttons.first.is_visible():
+                return "login_required"
+            is_form_surface = scope.evaluate("el => el.matches('form, dialog, [role=dialog]')")
+            if (
+                is_form_surface
+                and scope.locator(
+                    "input:not([type='hidden']), textarea, select, "
+                    "[role='combobox'], [role='radiogroup']"
+                ).count()
+            ):
+                return "application_form"
+            if is_form_surface and re.search(
+                r"\b(next|continue|review|apply|submit|application)\b", scoped_text
+            ):
+                return "application_form"
+        except Exception:
+            pass
 
     # ── Fast path: legacy classifier results ─────────────────
     if legacy_state == "account_required":
@@ -299,7 +334,7 @@ def _classify_page_type(page: Page, legacy_state: str) -> str:
     # Inspect visible input fields
     for selector in _FIELD_SELECTORS.values():
         try:
-            elements = page.locator(selector)
+            elements = scope.locator(selector)
             count = min(elements.count(), 50)
         except Exception:
             continue
@@ -322,24 +357,18 @@ def _classify_page_type(page: Page, legacy_state: str) -> str:
             label_lower = label.lower()
 
             # Search indicator
-            if any(
-                kw in label_lower
-                for kw in ["search", "keyword", "title", "skill", "company"]
-            ):
+            if any(kw in label_lower for kw in ["search", "keyword", "title", "skill", "company"]):
                 _has_search_input = True
 
             # Personal-info indicator
             if any(
-                kw in label_lower
-                for kw in ["first name", "last name", "email", "phone", "resume"]
+                kw in label_lower for kw in ["first name", "last name", "email", "phone", "resume"]
             ):
                 _has_personal_form = True
 
     # ── Classification rules ─────────────────────────────────
     is_linkedin_job_detail = (
-        "linkedin.com/jobs/view/" in url_lower
-        and not _has_personal_form
-        and not _has_file_upload
+        "linkedin.com/jobs/view/" in url_lower and not _has_personal_form and not _has_file_upload
     )
     if is_linkedin_job_detail:
         return "job_details"
@@ -358,8 +387,10 @@ def _classify_page_type(page: Page, legacy_state: str) -> str:
 
 # ── Field extraction ──────────────────────────────────────────────
 
+
 def _extract_fields(page: Page, resolver: ElementResolver) -> list[FormField]:
     fields: list[FormField] = []
+    radio_groups: set[str] = set()
 
     for selector_key, selector in _FIELD_SELECTORS.items():
         try:
@@ -379,10 +410,15 @@ def _extract_fields(page: Page, resolver: ElementResolver) -> list[FormField]:
 
             element_type = "text"
             current_value = ""
+            options = []
+            invalid = False
+            group_required = False
 
             try:
                 if selector_key == "input":
                     element_type = element.get_attribute("type") or "text"
+                    if element.get_attribute("role") == "combobox":
+                        element_type = "combobox"
                     try:
                         if element_type in ("checkbox", "radio"):
                             current_value = "true" if element.is_checked(timeout=300) else ""
@@ -398,6 +434,41 @@ def _extract_fields(page: Page, resolver: ElementResolver) -> list[FormField]:
                         current_value = ""
                 elif selector_key == "select":
                     element_type = "select"
+                    current_value = element.input_value(timeout=300)
+                    options = element.locator("option").evaluate_all(
+                        "els => els.filter(x => !x.disabled).map(x => "
+                        "({value:x.value, label:x.textContent.trim()}))"
+                    )
+                    selected_label = (
+                        element.locator("option:checked").inner_text(timeout=300).strip()
+                    )
+                    if re.match(r"^(select|choose)\b", selected_label, re.I):
+                        current_value = ""
+                elif selector_key == "combobox":
+                    element_type = "combobox"
+                    current_value = (
+                        element.get_attribute("data-value")
+                        or element.inner_text(timeout=300).strip()
+                    )
+                    if element.get_attribute("aria-placeholder") == current_value:
+                        current_value = ""
+                    if re.match(r"^(select|choose)\b", current_value, re.I):
+                        current_value = ""
+                elif selector_key == "radio_group":
+                    element_type = "radio_group"
+                    checked = element.locator("[role='radio'][aria-checked='true']")
+                    current_value = ""
+                    if checked.count():
+                        current_value = (
+                            checked.first.get_attribute("data-value")
+                            or checked.first.get_attribute("aria-label")
+                            or checked.first.inner_text(timeout=300)
+                        )
+                    options = element.locator("[role='radio']").evaluate_all(
+                        """els => els.filter(x => x.getAttribute('aria-disabled') !== 'true')
+                        .map(x => ({value:x.getAttribute('data-value') || x.textContent.trim(),
+                            label:x.getAttribute('aria-label') || x.textContent.trim()}))"""
+                    )
             except Exception:
                 continue
 
@@ -406,9 +477,48 @@ def _extract_fields(page: Page, resolver: ElementResolver) -> list[FormField]:
 
             label = label_text_for_input(element)
 
+            if element_type == "radio":
+                if element.evaluate("el => Boolean(el.closest('[role=radiogroup]'))"):
+                    continue
+                name = element.get_attribute("name") or ""
+                if name:
+                    # Treat a native radio question as one field, not multiple
+                    # independently required booleans.
+                    group = element.evaluate("el => (el.form ? el.form.id : '') + ':' + el.name")
+                    if group in radio_groups:
+                        continue
+                    radio_groups.add(group)
+                    data = element.evaluate("""el => {
+                        const root = el.form || el.closest('[role=dialog], dialog, main') ||
+                            el.getRootNode();
+                        const radios = Array.from(root.querySelectorAll('input[type=radio]'))
+                            .filter(x => x.name === el.name);
+                        const fieldset = el.closest('fieldset');
+                        return {value: (radios.find(x => x.checked) || {}).value || '',
+                            label: fieldset?.querySelector('legend')?.textContent.trim() || '',
+                            required: radios.some(x => x.required ||
+                                x.getAttribute('aria-required') === 'true'),
+                            options: radios.filter(x => !x.disabled).map(x => ({value:x.value,
+                                label:Array.from(x.labels || []).map(l => l.textContent.trim())
+                                    .join(' ') || x.getAttribute('aria-label') || x.value}))};
+                    }""")
+                    current_value = data["value"]
+                    group_required = data["required"]
+                    options = data["options"]
+                    label = data["label"] or label
+                    element_type = "radio_group"
+
             required = False
             try:
-                required = element.get_attribute("required") is not None
+                required = (
+                    element.get_attribute("required") is not None
+                    or element.get_attribute("aria-required") == "true"
+                    or group_required
+                )
+                invalid = element.get_attribute("aria-invalid") == "true" or (
+                    bool(current_value)
+                    and element.evaluate("el => Boolean(el.validity && !el.validity.valid)") is True
+                )
             except Exception:
                 pass
 
@@ -425,7 +535,7 @@ def _extract_fields(page: Page, resolver: ElementResolver) -> list[FormField]:
                 pass
             try:
                 readonly_attr = element.get_attribute("readonly")
-                readonly = readonly_attr is not None
+                readonly = readonly_attr is not None and element_type != "combobox"
             except Exception:
                 pass
 
@@ -444,6 +554,8 @@ def _extract_fields(page: Page, resolver: ElementResolver) -> list[FormField]:
                     enabled=enabled,
                     readonly=readonly,
                     interactable=interactable,
+                    options=options,
+                    invalid=invalid,
                 )
             )
 
@@ -452,9 +564,9 @@ def _extract_fields(page: Page, resolver: ElementResolver) -> list[FormField]:
 
 # ── Button extraction ─────────────────────────────────────────────
 
+
 def _extract_buttons(page: Page, resolver: ElementResolver) -> list[Button]:
     buttons: list[Button] = []
-    seen_texts: set[str] = set()
 
     button_selectors = [
         "button",
@@ -463,9 +575,12 @@ def _extract_buttons(page: Page, resolver: ElementResolver) -> list[Button]:
         # styled anchor without role="button".
         "a[href]",
         "[role='button']:not(a)",
+        "input[type='submit'], input[type='button']",
     ]
 
-    for selector in button_selectors:
+    # A CSS union returns each DOM node once while retaining distinct buttons
+    # with identical names (for example, disabled and enabled Next controls).
+    for selector in [", ".join(button_selectors)]:
         try:
             elements = page.locator(selector)
             count = min(elements.count(), 200)
@@ -482,8 +597,13 @@ def _extract_buttons(page: Page, resolver: ElementResolver) -> list[Button]:
                 continue
 
             try:
-                text = element.inner_text(timeout=300).strip()
-                if not text or text in seen_texts:
+                text = (
+                    element.inner_text(timeout=300).strip()
+                    or element.get_attribute("aria-label")
+                    or element.get_attribute("value")
+                    or ""
+                )
+                if not text:
                     continue
             except Exception:
                 continue
@@ -495,8 +615,6 @@ def _extract_buttons(page: Page, resolver: ElementResolver) -> list[Button]:
             # Filter out buttons inside nav / header / footer landmarks
             if _is_inside_nav_landmark(element):
                 continue
-
-            seen_texts.add(text)
 
             button_type = "button"
             href = ""
@@ -523,6 +641,7 @@ def _extract_buttons(page: Page, resolver: ElementResolver) -> list[Button]:
                 pass
 
             button_id = resolver.button_id(text)
+            resolver.remember(button_id, element)
 
             interactable = visible and enabled
 
@@ -543,6 +662,7 @@ def _extract_buttons(page: Page, resolver: ElementResolver) -> list[Button]:
 
 # ── File-input extraction ─────────────────────────────────────────
 
+
 def _extract_file_inputs(page: Page, resolver: ElementResolver) -> list[FileInput]:
     inputs: list[FileInput] = []
 
@@ -556,7 +676,13 @@ def _extract_file_inputs(page: Page, resolver: ElementResolver) -> list[FileInpu
         element = elements.nth(index)
 
         try:
-            if not element.is_visible(timeout=300):
+            if (
+                element.evaluate(
+                    "el => Boolean(el.closest('[hidden], [aria-hidden=true]')) || "
+                    "!el.parentElement.getClientRects().length"
+                )
+                is True
+            ):
                 continue
         except Exception:
             continue
@@ -586,8 +712,11 @@ def _extract_file_inputs(page: Page, resolver: ElementResolver) -> list[FileInpu
             pass
 
         file_id = resolver.file_id(label)
+        resolver.remember(file_id, element)
 
-        interactable = visible and enabled
+        # File controls are commonly hidden behind an upload button. Playwright
+        # can set their files directly even when the input itself is invisible.
+        interactable = enabled
 
         inputs.append(
             FileInput(
@@ -605,6 +734,7 @@ def _extract_file_inputs(page: Page, resolver: ElementResolver) -> list[FileInpu
 
 
 # ── Error / status detection ──────────────────────────────────────
+
 
 def _detect_error_messages(page: Page) -> list[str]:
     messages: list[str] = []
@@ -636,8 +766,14 @@ def _detect_error_messages(page: Page) -> list[str]:
                         if text and any(
                             marker in text_lower
                             for marker in (
-                                "error", "invalid", "required", "please correct",
-                                "please enter", "please fix", "unable", "failed",
+                                "error",
+                                "invalid",
+                                "required",
+                                "please correct",
+                                "please enter",
+                                "please fix",
+                                "unable",
+                                "failed",
                             )
                         ):
                             messages.append(text)
@@ -663,6 +799,7 @@ def _detect_status_message(page: Page) -> str:
 
 
 # ── Main entry point ──────────────────────────────────────────────
+
 
 def observe_page(page: Page) -> PageSnapshot:
     """Build a structured snapshot of the current page state.
@@ -712,7 +849,8 @@ def observe_page(page: Page) -> PageSnapshot:
     except Exception:
         pass
 
-    page_type = _classify_page_type(page, legacy_state)
+    scope = interaction_scope(page)
+    page_type = _classify_page_type(page, legacy_state, scope)
 
     # Short-circuit: login/unavailable/redirect pages rarely have
     # useful form fields — skip heavy extraction.
@@ -728,11 +866,12 @@ def observe_page(page: Page) -> PageSnapshot:
         )
 
     resolver = ElementResolver(page)
+    resolver.reset()
 
-    fields = _extract_fields(page, resolver)
-    buttons = _extract_buttons(page, resolver)
-    file_inputs = _extract_file_inputs(page, resolver)
-    error_messages = _detect_error_messages(page)
+    fields = _extract_fields(scope, resolver)
+    buttons = _extract_buttons(scope, resolver)
+    file_inputs = _extract_file_inputs(scope, resolver)
+    error_messages = _detect_error_messages(scope)
     status_message = _detect_status_message(page)
 
     now = datetime.now(timezone.utc)

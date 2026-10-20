@@ -9,19 +9,34 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+
 from playwright.sync_api import Page
 
 from agent.ats import ATSCapability, ATSPlatform, assess_ats
-from agent.execute import Executor, BrowserAction, BrowserCommand, ExecutionResult
+from agent.execute import BrowserAction, BrowserCommand, ExecutionResult, Executor
 from agent.layout_fallback import OllamaLayoutFallback
 from agent.observe import observe_page
 from agent.planner import RuleBasedPlanner
 from agent.safety import Safety, SafetyDecision
 from agent.types import ActionRecord, PageSnapshot, TaskInfo
-from agent.verifier import Verifier, VerificationStatus
+from agent.verifier import VerificationStatus, Verifier
 from config import ENABLE_OLLAMA_LAYOUT_FALLBACK
 
-MAX_ITERATIONS = 15
+MAX_ITERATIONS = 80
+MAX_STALLED_ACTIONS = 3
+
+
+def _progress_key(snapshot: PageSnapshot) -> tuple:
+    """Compare observable state, excluding fresh observation IDs/timestamps."""
+    return (
+        snapshot.url,
+        snapshot.page_type,
+        tuple((field.id, field.value, field.invalid) for field in snapshot.fields),
+        tuple((upload.id, upload.has_file) for upload in snapshot.file_inputs),
+        tuple((button.id, button.interactable) for button in snapshot.buttons),
+        tuple(snapshot.error_messages),
+        snapshot.status_message,
+    )
 
 
 class AgentResult:
@@ -68,7 +83,9 @@ def _log_iteration(
     print(f"    Observed:   {snapshot.page_type} ({snapshot.url[:80]})")
     print(f"    Planner:    {planner_cmd.action.value} {planner_cmd.target or ''}")
     print(f"    Safety:     {'Allowed' if decision.allowed else 'Blocked: ' + decision.reason}")
-    print(f"    Executor:   {'Success' if exec_result.success else 'Failed: ' + exec_result.message}")
+    print(
+        f"    Executor:   {'Success' if exec_result.success else 'Failed: ' + exec_result.message}"
+    )
     print(f"    Verifier:   {verify_status.value}")
     print()
 
@@ -109,6 +126,7 @@ def run_agent(
     fields_filled: list[str] = []
     timeline: list[ActionRecord] = []
     submission_confirmation_used = False
+    stalled_actions = 0
 
     def finish(**kwargs) -> AgentResult:
         kwargs.setdefault("active_page", active_page)
@@ -143,7 +161,9 @@ def run_agent(
                 fields_filled=fields_filled,
                 timeline=timeline,
             )
-        application_form_opened = application_form_opened or snapshot.page_type == "application_form"
+        application_form_opened = (
+            application_form_opened or snapshot.page_type == "application_form"
+        )
 
         # ── Verify early exit ──────────────────────────────────
         verify_status = verifier.verify(snapshot)
@@ -152,14 +172,19 @@ def run_agent(
             VerificationStatus.ACCOUNT_REQUIRED,
         ):
             _log_iteration(
-                iteration, snapshot,
+                iteration,
+                snapshot,
                 BrowserCommand(action=BrowserAction.WAIT),
                 SafetyDecision(allowed=True, reason=""),
-                ExecutionResult(success=True, action="verify", target=None, message="", duration_ms=0),
+                ExecutionResult(
+                    success=True, action="verify", target=None, message="", duration_ms=0
+                ),
                 verify_status,
             )
             return finish(
-                status="SUBMISSION_DETECTED" if verify_status == VerificationStatus.SUCCESS else verify_status.value,
+                status="SUBMISSION_DETECTED"
+                if verify_status == VerificationStatus.SUCCESS
+                else verify_status.value,
                 snapshot=snapshot,
                 iterations=iteration,
                 last_action=last_action,
@@ -250,10 +275,20 @@ def run_agent(
                     confidence=1.0,
                 )
             )
-            _log_iteration(iteration, snapshot, cmd, decision,
-                           ExecutionResult(success=False, action=cmd.action.value, target=cmd.target,
-                                           message=decision.reason, duration_ms=0),
-                           verify_status)
+            _log_iteration(
+                iteration,
+                snapshot,
+                cmd,
+                decision,
+                ExecutionResult(
+                    success=False,
+                    action=cmd.action.value,
+                    target=cmd.target,
+                    message=decision.reason,
+                    duration_ms=0,
+                ),
+                verify_status,
+            )
             return finish(
                 status="REVIEW_READY_CANDIDATE" if final_review_detected else "MANUAL_REQUIRED",
                 snapshot=snapshot,
@@ -272,7 +307,10 @@ def run_agent(
         is_external_linkedin_apply = (
             snapshot.page_type == "job_details"
             and cmd.action is BrowserAction.CLICK_BUTTON
-            and (cmd.target or "").lower() == "button:apply"
+            and any(
+                button.id == cmd.target and button.text.strip().casefold() == "apply"
+                for button in snapshot.buttons
+            )
         )
         if is_external_linkedin_apply:
             approved = bool(external_apply_approval and external_apply_approval(snapshot, cmd))
@@ -282,7 +320,10 @@ def run_agent(
                     snapshot=snapshot,
                     iterations=iteration,
                     last_action=last_action,
-                    reason="LinkedIn Apply can share your profile with the job poster; explicit confirmation is required.",
+                    reason=(
+                        "LinkedIn Apply can share your profile with the job poster; "
+                        "explicit confirmation is required."
+                    ),
                     ats=ats,
                     application_form_opened=application_form_opened,
                     resume_uploaded=resume_uploaded,
@@ -291,6 +332,7 @@ def run_agent(
                     timeline=timeline,
                 )
         try:
+            before_action = snapshot
             exec_result = executor.execute(cmd)
             active_page = getattr(executor, "page", active_page)
         except Exception as exc:
@@ -313,11 +355,16 @@ def run_agent(
         )
         if exec_result.success and cmd.action == BrowserAction.UPLOAD_FILE:
             resume_uploaded = True
-        if exec_result.success and cmd.action in {
-            BrowserAction.FILL_FIELD,
-            BrowserAction.SELECT_OPTION,
-            BrowserAction.CHECK_CHECKBOX,
-        } and cmd.target:
+        if (
+            exec_result.success
+            and cmd.action
+            in {
+                BrowserAction.FILL_FIELD,
+                BrowserAction.SELECT_OPTION,
+                BrowserAction.CHECK_CHECKBOX,
+            }
+            and cmd.target
+        ):
             fields_filled.append(cmd.target)
 
         # ── Verify after execution ─────────────────────────────
@@ -326,6 +373,9 @@ def run_agent(
             verify_status = verifier.verify(snapshot)
         except Exception:
             verify_status = VerificationStatus.UNKNOWN
+
+        progressed = _progress_key(before_action) != _progress_key(snapshot)
+        stalled_actions = 0 if progressed else stalled_actions + 1
 
         _log_iteration(iteration, snapshot, cmd, decision, exec_result, verify_status)
 
@@ -344,6 +394,23 @@ def run_agent(
             )
 
         if verify_status == VerificationStatus.FAILED:
+            # Repair only a known field using an existing profile answer.
+            # Unknown questions and already-rejected configured values still
+            # require human review; never invent an answer to clear an error.
+            correction = planner.plan(snapshot)
+            if (
+                stalled_actions < MAX_STALLED_ACTIONS
+                and correction.action
+                in {
+                    BrowserAction.FILL_FIELD,
+                    BrowserAction.SELECT_OPTION,
+                    BrowserAction.CHECK_CHECKBOX,
+                    BrowserAction.UPLOAD_FILE,
+                }
+                and safety.check(correction).allowed
+            ):
+                time.sleep(0.5)
+                continue
             return finish(
                 status="FAILED",
                 snapshot=snapshot,
@@ -358,12 +425,20 @@ def run_agent(
                 timeline=timeline,
             )
 
-        if not exec_result.success:
+        if not exec_result.success and stalled_actions < MAX_STALLED_ACTIONS:
+            # Resolve again from a fresh observation on the next pass. This
+            # handles a detached input or late-rendered options without ever
+            # retrying a final submission (that path exits separately).
+            time.sleep(0.5)
+            continue
+
+        if stalled_actions >= MAX_STALLED_ACTIONS:
             return finish(
                 status="FAILED",
                 snapshot=snapshot,
                 iterations=iteration,
                 last_action=last_action,
+                reason="No observable progress after three attempts; stopping for review.",
                 ats=ats,
                 application_form_opened=application_form_opened,
                 resume_uploaded=resume_uploaded,
@@ -377,7 +452,7 @@ def run_agent(
 
     return finish(
         status="TIMEOUT",
-        snapshot=snapshot if 'snapshot' in locals() else None,
+        snapshot=snapshot if "snapshot" in locals() else None,
         iterations=MAX_ITERATIONS,
         last_action=last_action,
         ats=ats,

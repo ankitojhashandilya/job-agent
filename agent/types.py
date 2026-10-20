@@ -33,6 +33,8 @@ class FormField:
     enabled: bool = True
     readonly: bool = False
     interactable: bool = True
+    options: list[dict[str, str]] = field(default_factory=list)
+    invalid: bool = False
 
 
 @dataclass
