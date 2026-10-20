@@ -1,59 +1,18 @@
 # prompts.py
 
-SCORING_PROMPT = """
-You are an expert recruiter specializing in senior data engineering roles.
-
-Your task is to perform semantic analysis of a job posting against a candidate profile.
-
-Candidate Resume Profile:
+SCORING_PROMPT = """Compare the job with the candidate for a senior data engineering role.
+Candidate resume:
 {resume_profile}
-
-Candidate Preferences:
+Candidate preferences:
 {candidate_profile}
-
 Job:
 {job}
-
-Analysis Criteria:
-
-Technical Fit
-- Identify skills from the candidate's profile that match skills
-  explicitly mentioned in the job title, description, or metadata.
-- Identify important skills mentioned in the job that are missing
-  from the candidate profile.
-
-Seniority Match
-- Consider the seniority level implied by the job title.
-
-Leadership & Architecture
-- Note any indicators of leadership, architecture ownership,
-  mentoring, or cross-functional collaboration in the job.
-
-Location Fit
-- Note whether the job location aligns with candidate preferences.
-
-Domain Fit
-- Note any domain or industry alignment mentioned.
-
-Growth Opportunity
-- Note exposure to modern technologies, strategic influence,
-  or career progression potential.
-
-Rules:
-- Only consider skills explicitly mentioned in the job title,
-  job description, or job metadata.
-- Do NOT infer skill matches from the candidate profile alone.
-- If the job description is weak or incomplete, state that clearly.
-- Return valid JSON only.
-- Do not include markdown fences.
-- Do not include explanations outside JSON.
-
-Return ONLY this JSON structure:
-
-{{
-    "matched_skills": ["skill1", "skill2"],
-    "missing_skills": ["skill3", "skill4"],
-    "reason": "one or two concise sentences summarizing fit",
-    "optional_observations": "any additional notes"
-}}
+List concrete technical skills required by the job: matched skills must also
+appear in the candidate profile; missing skills must be absent from it.
+Never infer a requirement from the candidate profile alone. Prioritize the most
+important requirements, at most 10 skills per list. If the description is weak
+or incomplete, say so. Mention seniority, leadership, domain or location only
+when relevant to fit. The reason must be one sentence of at most 25 words.
+Return JSON only, without markdown or extra keys:
+{{"matched_skills":[],"missing_skills":[],"reason":""}}
 """

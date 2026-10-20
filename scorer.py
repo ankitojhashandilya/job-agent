@@ -1,19 +1,22 @@
-
 # scorer.py
 
+import hashlib
 import json
+import time
 from functools import lru_cache
 
+from agent.scoring import ScoreCalculator
 from config import (
     APPLY_SCORE,
-    REVIEW_SCORE,
-    MAYBE_SCORE,
-    SCORING_WEIGHTS,
-    RESUME_PROFILE_PATH,
     CANDIDATE_PROFILE_PATH,
+    MAYBE_SCORE,
+    OLLAMA_MODEL,
+    OLLAMA_OPTIONS,
+    RESUME_PROFILE_PATH,
+    REVIEW_SCORE,
+    SCORING_WEIGHTS,
 )
-
-from agent.scoring import ScoreCalculator
+from discovery_cache import DiscoveryCache
 from ollama_client import generate_json
 from prompts import SCORING_PROMPT
 
@@ -21,16 +24,9 @@ from prompts import SCORING_PROMPT
 @lru_cache(maxsize=1)
 def load_resume_profile() -> dict:
     if not RESUME_PROFILE_PATH.exists():
-        raise FileNotFoundError(
-            f"Missing {RESUME_PROFILE_PATH}. "
-            "Run resume_parser.py first."
-        )
+        raise FileNotFoundError(f"Missing {RESUME_PROFILE_PATH}. Run resume_parser.py first.")
 
-    return json.loads(
-        RESUME_PROFILE_PATH.read_text(
-            encoding="utf-8"
-        )
-    )
+    return json.loads(RESUME_PROFILE_PATH.read_text(encoding="utf-8"))
 
 
 @lru_cache(maxsize=1)
@@ -38,30 +34,23 @@ def load_candidate_profile() -> dict:
     if not CANDIDATE_PROFILE_PATH.exists():
         return {}
 
-    return json.loads(
-        CANDIDATE_PROFILE_PATH.read_text(
-            encoding="utf-8"
-        )
-    )
+    return json.loads(CANDIDATE_PROFILE_PATH.read_text(encoding="utf-8"))
 
 
 def build_prompt(job: dict) -> str:
     resume_profile = load_resume_profile()
     candidate_profile = load_candidate_profile()
 
+    # Job.to_dict() also contains raw.description. Sending the full object
+    # duplicated the posting and could evict the candidate profile from context.
+    semantic_job = {
+        key: job.get(key, "") for key in ("title", "company", "location", "description")
+    }
+    compact = {"separators": (",", ":"), "ensure_ascii": False, "sort_keys": True}
     return SCORING_PROMPT.format(
-        resume_profile=json.dumps(
-            resume_profile,
-            indent=2,
-        ),
-        candidate_profile=json.dumps(
-            candidate_profile,
-            indent=2,
-        ),
-        job=json.dumps(
-            job,
-            indent=2,
-        ),
+        resume_profile=json.dumps(resume_profile, **compact),
+        candidate_profile=json.dumps(candidate_profile, **compact),
+        job=json.dumps(semantic_job, **compact),
     )
 
 
@@ -132,26 +121,14 @@ def validate_response(
     normalized = {}
     for key, value in response.items():
         if isinstance(key, str):
-            cleaned_key = (
-                key.replace("\n", "")
-                .replace("\r", "")
-                .strip()
-                .strip('"')
-                .strip("'")
-            )
+            cleaned_key = key.replace("\n", "").replace("\r", "").strip().strip('"').strip("'")
             normalized[cleaned_key] = value
         else:
             normalized[key] = value
 
     response = normalized
 
-    print("\n========== RAW NORMALIZED RESPONSE ==========")
-    print(response)
-    print("=============================================\n")
-
-    reason = str(
-        response.get("reason", "No reason provided.")
-    ).strip()
+    reason = str(response.get("reason", "No reason provided.")).strip()
 
     matched_skills = response.get("matched_skills", [])
     missing_skills = response.get("missing_skills", [])
@@ -161,12 +138,8 @@ def validate_response(
     if not isinstance(missing_skills, list):
         missing_skills = []
 
-    matched_skills = sorted(
-        {str(s).strip() for s in matched_skills if str(s).strip()}
-    )
-    missing_skills = sorted(
-        {str(s).strip() for s in missing_skills if str(s).strip()}
-    )
+    matched_skills = sorted({str(s).strip() for s in matched_skills if str(s).strip()})
+    missing_skills = sorted({str(s).strip() for s in missing_skills if str(s).strip()})
 
     # Compute score deterministically from the LLM's semantic analysis and
     # the original job.  The prior implementation built this data from the
@@ -198,14 +171,34 @@ def score_job(
     job: dict,
 ) -> dict:
     prompt = build_prompt(job)
-
-    response = generate_json(prompt)
-
-    print("\n========== RAW QWEN RESPONSE ==========")
-    print(response)
-    print("=======================================\n")
-
-    return validate_response(response, job)
+    cache = DiscoveryCache()
+    key = hashlib.sha256(
+        json.dumps([prompt, OLLAMA_MODEL, OLLAMA_OPTIONS], sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    response = cache.get("analysis-v1", key, 7 * 24 * 3600)
+    if response is not None:
+        print(f"  Reusing saved analysis: {job.get('title', '')}")
+    else:
+        started = time.monotonic()
+        print(f"  Analyzing fit with {OLLAMA_MODEL}: {job.get('title', '')}", flush=True)
+        response = generate_json(prompt)
+        if (
+            not isinstance(response, dict)
+            or not all(key in response for key in ("matched_skills", "missing_skills", "reason"))
+            or not (
+                isinstance(response["matched_skills"], list)
+                and isinstance(response["missing_skills"], list)
+                and isinstance(response["reason"], str)
+                and response["reason"].strip()
+            )
+        ):
+            raise ValueError("Model analysis is incomplete; it has not been cached.")
+        cache.put("analysis-v1", key, response)
+        print(f"  Analysis completed in {time.monotonic() - started:.1f}s")
+    # Recompute deterministic scoring even when semantic analysis is cached.
+    result = validate_response(response, job)
+    print(f"  Result: {result['status']} ({result['score']}/100)", flush=True)
+    return result
 
 
 def clear_profile_cache():

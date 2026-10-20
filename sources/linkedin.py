@@ -11,11 +11,14 @@ API and pipeline continue working unchanged.
 
 from __future__ import annotations
 
+import re
+import time
 from typing import Any
 from urllib.parse import quote_plus, urlsplit, urlunsplit
 
 from playwright.sync_api import Error, TimeoutError, sync_playwright
 
+from browser.linkedin_details import READ_DESCRIPTION, wait_for_description
 from browser.linkedin_search import read_search_results
 from browser_session import launch_linkedin_context
 from config import (
@@ -24,6 +27,7 @@ from config import (
     SEARCH_LOCATION,
 )
 from core.models import Job
+from discovery_cache import DiscoveryCache
 from sources.base import JobSource, SourceInfo
 from sources.raw import RawJob
 
@@ -160,29 +164,37 @@ def collect_all_search_results(
     return all_jobs
 
 
-def load_job_details(page, summary: dict) -> dict:
+def load_job_details(page, summary: dict, *, cache: DiscoveryCache | None = None) -> dict:
+    if cache is not None:
+        saved = cache.get("linkedin-details-v1", clean_url(summary["url"]), 6 * 3600)
+        if saved:
+            print("  Reusing saved job description")
+            return {**saved, **{key: value for key, value in summary.items() if value}}
     page.goto(
         summary["url"],
         wait_until="domcontentloaded",
         timeout=60000,
     )
 
-    try:
-        page.wait_for_load_state("networkidle", timeout=10000)
-    except Exception:
-        pass
-
-    page.wait_for_timeout(3000)
+    description = wait_for_description(page)
 
     # Expand job description if collapsed
     try:
-        show_more = page.locator(
-            'button:has-text("Show more"), button[aria-label*="Show more"]'
+        show_more = page.get_by_role(
+            "button", name=re.compile(r"^(show more|see more)$", re.I)
         ).first
 
         if show_more.count() > 0 and show_more.is_visible():
             show_more.click(timeout=2000)
-            page.wait_for_timeout(1000)
+            try:
+                page.wait_for_function(
+                    f"length => ({READ_DESCRIPTION})().length > length",
+                    arg=len(description),
+                    timeout=1500,
+                )
+            except TimeoutError:
+                pass
+            description = page.evaluate(READ_DESCRIPTION)
 
     except Exception:
         pass
@@ -212,51 +224,11 @@ def load_job_details(page, summary: dict) -> dict:
         ],
     )
 
-    description = ""
-
-    description_selectors = [
-        "#job-details",
-        ".jobs-description-content__text",
-        ".jobs-description__content",
-        ".jobs-box__html-content",
-    ]
-
-    for selector in description_selectors:
-        try:
-            locator = page.locator(selector).first
-            if locator.count() > 0:
-                text = locator.inner_text(timeout=5000).strip()
-                if len(text) > 300:
-                    description = text
-                    break
-        except Exception:
-            continue
-
-    # Retry after scrolling
-    if len(description) < 300:
-        try:
-            page.mouse.wheel(0, 3000)
-            page.wait_for_timeout(2000)
-
-            for selector in description_selectors:
-                try:
-                    locator = page.locator(selector).first
-                    if locator.count() > 0:
-                        text = locator.inner_text(timeout=5000).strip()
-                        if len(text) > 300:
-                            description = text
-                            break
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
-    if len(description) < 300:
-        fallback_description = description_from_visible_text(page)
-        if len(fallback_description) > len(description):
-            description = fallback_description
-
-    return {
+    if len(description) < 100:
+        raise RuntimeError(
+            "The job description did not load; no empty description has been cached."
+        )
+    detail = {
         "company": company or summary["company"],
         "title": title or summary["title"],
         "location": location or summary["location"],
@@ -264,6 +236,9 @@ def load_job_details(page, summary: dict) -> dict:
         "search_keyword": summary.get("search_keyword", ""),
         "description": description[:15000],
     }
+    if cache is not None:
+        cache.put("linkedin-details-v1", clean_url(summary["url"]), detail)
+    return detail
 
 
 class LinkedInSource(JobSource):
@@ -330,6 +305,8 @@ class LinkedInSource(JobSource):
 
         location = kwargs.get("location") or SEARCH_LOCATION
         jobs: list[Job] = []
+        cache = DiscoveryCache()
+        on_job = kwargs.get("on_job")
 
         with sync_playwright() as playwright:
             context = launch_linkedin_context(playwright)
@@ -351,17 +328,25 @@ class LinkedInSource(JobSource):
                     print(f"[{index}/{len(summaries)}] Reading {summary['title']}...")
 
                     try:
-                        detail = load_job_details(detail_page, summary)
+                        started = time.monotonic()
+                        detail = load_job_details(detail_page, summary, cache=cache)
                         raw = RawJob.from_raw(detail, source_name=self.name)
-                        jobs.append(self.normalize(raw))
+                        job = self.normalize(raw)
+                        jobs.append(job)
+                        print(f"  Description ready in {time.monotonic() - started:.1f}s")
                     except Exception as error:
                         print(f"  Skipped because: {error}")
+                        continue
+                    if on_job:
+                        on_job(job)
             finally:
                 try:
                     context.close()
                 except Error:
                     pass
 
+        if summaries and not jobs:
+            raise RuntimeError("Search found jobs but every detail page failed to load.")
         return jobs
 
 

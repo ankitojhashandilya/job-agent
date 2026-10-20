@@ -122,3 +122,44 @@ def test_failed_source_does_not_replace_previous_exports(tmp_path, monkeypatch):
         discovery.run_discovery()
     assert json_path.read_text(encoding="utf-8") == '[{"title":"Previous result"}]'
     assert csv_path.read_text(encoding="utf-8") == "title\nPrevious result\n"
+
+
+def test_description_waits_for_content_and_keeps_skills_section(page):
+    from browser.linkedin_details import wait_for_description
+
+    page.set_content("<main>Loading...</main>")
+    description = "Python data pipelines and SQL. " * 12 + "\nSkills\nKafka and Spark"
+    page.evaluate(
+        "text => setTimeout(() => document.querySelector('main').innerText = "
+        "'About the job\\n' + text + '\\nAbout the company\\nUnrelated marketing', 100)",
+        description,
+    )
+    result = wait_for_description(page, timeout_ms=2000)
+    assert "Kafka and Spark" in result
+    assert "Unrelated marketing" not in result
+
+
+def test_description_load_has_no_network_idle_wait_and_can_be_reused(page, tmp_path, monkeypatch):
+    import discovery_cache
+    from discovery_cache import DiscoveryCache
+    from sources.linkedin import load_job_details
+
+    monkeypatch.setattr(discovery_cache, "CACHE_PATH", tmp_path / "cache.sqlite3")
+    cache = DiscoveryCache()
+    html = "<h1>Engineer</h1><div id='job-details'>" + "Python pipelines. " * 30 + "</div>"
+    page.context.route("**/jobs/view/**", lambda route: route.fulfill(body=html))
+    wait = MagicMock()
+    monkeypatch.setattr(page, "wait_for_load_state", wait)
+    summary = {
+        "url": "https://www.linkedin.com/jobs/view/123/",
+        "title": "Engineer",
+        "company": "Acme",
+        "location": "Remote",
+    }
+    first = load_job_details(page, summary, cache=cache)
+    wait.assert_not_called()
+    second_page = MagicMock()
+    second = load_job_details(second_page, {**summary, "title": "Updated title"}, cache=cache)
+    second_page.goto.assert_not_called()
+    assert second["description"] == first["description"]
+    assert second["title"] == "Updated title"

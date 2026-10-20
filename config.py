@@ -116,7 +116,7 @@ class Settings:
     ollama_url: str = "http://localhost:11434/api/generate"
     ollama_model: str = "qwen3:8b"
     ollama_options: dict[str, object] = field(
-        default_factory=lambda: {"temperature": 0.0, "num_predict": 512}
+        default_factory=lambda: {"temperature": 0.0, "num_predict": 384, "num_ctx": 8192}
     )
     ollama_timeout: int = 180
     ollama_retries: int = 3
@@ -213,9 +213,7 @@ class Settings:
     stop_before_submit: bool = True
 
     # Status vocabularies
-    job_statuses: list[str] = field(
-        default_factory=lambda: ["Apply", "Review", "Maybe", "Reject"]
-    )
+    job_statuses: list[str] = field(default_factory=lambda: ["Apply", "Review", "Maybe", "Reject"])
     application_statuses: list[str] = field(
         default_factory=lambda: [
             "DISCOVERED",
@@ -295,9 +293,7 @@ class Settings:
             ("application profile", self.application_profile_path),
         ]:
             if not path.exists():
-                warnings.append(
-                    f"Missing {label}: {path} (optional, pipeline still runs)"
-                )
+                warnings.append(f"Missing {label}: {path} (optional, pipeline still runs)")
         return warnings
 
 

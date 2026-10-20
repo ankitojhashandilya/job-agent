@@ -2,21 +2,19 @@ import json
 from datetime import datetime
 
 from config import JOB_HISTORY_JSON
+from core.persistence import write_text_atomic
 
 
 def load_history() -> dict:
     if not JOB_HISTORY_JSON.exists():
         return {}
 
-    return json.loads(
-        JOB_HISTORY_JSON.read_text(
-            encoding="utf-8"
-        )
-    )
+    return json.loads(JOB_HISTORY_JSON.read_text(encoding="utf-8"))
 
 
 def save_history(history: dict) -> None:
-    JOB_HISTORY_JSON.write_text(
+    write_text_atomic(
+        JOB_HISTORY_JSON,
         json.dumps(history, indent=2),
         encoding="utf-8",
     )

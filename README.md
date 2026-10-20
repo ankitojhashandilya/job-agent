@@ -504,6 +504,35 @@ after re-rendering. It never applies to live jobs:
 .\venv\Scripts\python.exe -m pytest -q
 ```
 
+### Slow discovery or interrupted AI Assistant runs
+
+Descriptions are read from LinkedIn; Ollama produces a short fit analysis.
+The reader waits for description content instead of waiting for LinkedIn's
+background network requests to finish. Model prompts contain the description
+once, omit duplicated raw metadata, and request concise JSON. Raw model output
+is hidden unless `JOB_AGENT_DEBUG_LLM=true`.
+
+Descriptions are cached locally for six hours in the ignored
+`discovery_cache.sqlite3`; semantic analyses are cached for seven days. Changes
+to the description, candidate profile, model, prompt, or sampling options cause
+a fresh analysis. Scores are recalculated from cached analysis using the current
+scorecard. Each completed score is saved immediately, and interrupted writes do
+not replace a valid export with a partial file. Concurrent discovery runs are
+rejected so duplicate runs do not compete for the local model.
+
+The local AI Assistant runner fix is versioned with this repository:
+
+```powershell
+.\venv\Scripts\python.exe .\scripts\update_ai_assistant_runner.py --project C:\AI\Projects\ai-assistant
+```
+
+Restart AI Assistant's web server after installing it. Its job-command budget
+defaults to 3,600 seconds and can be set with `JOB_AGENT_COMMAND_TIMEOUT` in
+AI Assistant's `.env`. Cancellation and timeout stop the Windows worker tree,
+including the virtual environment's child Python process. Completed cache
+entries survive cancellation and are reused on retry. A model's first cold start
+can still take longer than subsequent analyses.
+
 ### Scores are all 0
 
 Ensure Ollama is running and a model is pulled. Check that the resume was parsed successfully:

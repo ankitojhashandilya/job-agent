@@ -1,11 +1,15 @@
 # discovery.py
 
 import csv
+import io
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from config import JOB_RESULTS_CSV, JOB_RESULTS_JSON
+from core.persistence import write_text_atomic
+from discovery_cache import discovery_lock
 from job_history import update_job_history
 from scorer import score_job
 from sources import DiscoveryEngine, SourceManager, SourceRegistry
@@ -44,6 +48,16 @@ def run_discovery(
     location: str | None = None,
     limit: int | None = None,
 ) -> list[dict]:
+    """Run one resumable discovery at a time against the local exports."""
+    with discovery_lock():
+        return _run_discovery(keywords, location, limit)
+
+
+def _run_discovery(
+    keywords: list[str] | None = None,
+    location: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
     """Discover, score, and persist jobs via the plugin architecture.
 
     This is the new pipeline entry point. It replaces the legacy
@@ -63,22 +77,34 @@ def run_discovery(
     manager = SourceManager(registry)
     engine = DiscoveryEngine(manager)
 
-    jobs = engine.discover(
-        keywords=keywords,
-        location=location,
-        limit=limit,
-    )
-
-    if not jobs and manager.last_errors:
-        details = "; ".join(
-            f"{source}: {message}" for source, message in manager.last_errors.items()
-        )
-        raise RuntimeError(f"All enabled discovery sources failed. {details}")
-
     results: list[dict] = []
-    for job in jobs:
+    attempted: set[str] = set()
+    failures: list[str] = []
+    previous = {}
+    if JOB_RESULTS_JSON.exists():
+        try:
+            saved = json.loads(JOB_RESULTS_JSON.read_text(encoding="utf-8"))
+            previous = {
+                row["url"]: row for row in saved if isinstance(row, dict) and row.get("url")
+            }
+        except (ValueError, TypeError):
+            pass
+
+    def process_job(job):
+        if job.url in attempted:
+            return
+        attempted.add(job.url)
         summary = job.to_dict()
-        scoring = score_job(summary)
+        started = time.monotonic()
+        try:
+            scoring = score_job(summary)
+        except Exception as error:
+            failures.append(job.url)
+            print(
+                f"  Could not score {job.title}: {error}. Continuing; retry will resume.",
+                flush=True,
+            )
+            return
         record = {
             "company": job.company,
             "title": job.title,
@@ -95,13 +121,42 @@ def run_discovery(
         }
         results.append(record)
         update_job_history(record, record["status"], "discovery")
-        _persist(results)
+        previous[record["url"]] = record
+        _persist(list(previous.values()))
+        print(
+            f"  Saved {len(results)} scored jobs this run ({time.monotonic() - started:.1f}s)",
+            flush=True,
+        )
 
-    _persist(results)
-    print(
-        f"Saved {len(results)} jobs to "
-        f"{JOB_RESULTS_JSON} and {JOB_RESULTS_CSV}"
+    # LinkedIn reports each job as soon as its description is ready. Other
+    # plugins can still return their ordinary list and are processed below.
+    jobs = engine.discover(
+        keywords=keywords,
+        location=location,
+        limit=limit,
+        on_job=process_job,
     )
+    if not jobs and manager.last_errors:
+        details = "; ".join(
+            f"{source}: {message}" for source, message in manager.last_errors.items()
+        )
+        raise RuntimeError(f"All enabled discovery sources failed. {details}")
+    for job in jobs:
+        process_job(job)
+    if failures and not results:
+        raise RuntimeError(
+            "No jobs could be scored. Previous results are retained; inspect the model errors."
+        )
+    if failures:
+        print(
+            f"Scored {len(results)} jobs; {len(failures)} need a retry. "
+            "Completed analyses are cached."
+        )
+
+    # Only replace the export with the exact current result set after the
+    # run succeeds. Interruptions retain earlier results plus new checkpoints.
+    _persist(results)
+    print(f"Saved {len(results)} jobs to {JOB_RESULTS_JSON} and {JOB_RESULTS_CSV}")
     return results
 
 
@@ -117,7 +172,8 @@ def _persist(results: list[dict]) -> None:
 
     # Export label — companion metadata, keeps the existing JSON/CSV
     # formats byte-for-byte compatible with all current consumers.
-    JOB_RESULTS_JSON.with_name("job_results.export.json").write_text(
+    write_text_atomic(
+        JOB_RESULTS_JSON.with_name("job_results.export.json"),
         json.dumps(
             {
                 "_export": True,
@@ -131,28 +187,21 @@ def _persist(results: list[dict]) -> None:
         encoding="utf-8",
     )
 
-    JOB_RESULTS_JSON.write_text(
+    write_text_atomic(
+        JOB_RESULTS_JSON,
         json.dumps(results, indent=2),
         encoding="utf-8",
     )
 
-    with JOB_RESULTS_CSV.open(
-        "w",
-        newline="",
-        encoding="utf-8-sig",
-    ) as file:
+    with io.StringIO(newline="") as file:
         writer = csv.DictWriter(file, fieldnames=RESULTS_COLUMNS)
         writer.writeheader()
 
         for result in results:
             row = {key: result.get(key, "") for key in RESULTS_COLUMNS}
 
-            row["matched_skills"] = ", ".join(
-                result.get("matched_skills", [])
-            )
-            row["missing_skills"] = ", ".join(
-                result.get("missing_skills", [])
-            )
+            row["matched_skills"] = ", ".join(result.get("matched_skills", []))
+            row["missing_skills"] = ", ".join(result.get("missing_skills", []))
 
             subscores = result.get("subscores", {})
             row["technical_fit"] = subscores.get("technical_fit", 0)
@@ -163,6 +212,7 @@ def _persist(results: list[dict]) -> None:
             row["growth_fit"] = subscores.get("growth", 0)
 
             writer.writerow(row)
+        write_text_atomic(JOB_RESULTS_CSV, file.getvalue(), encoding="utf-8-sig")
 
 
 def main() -> None:

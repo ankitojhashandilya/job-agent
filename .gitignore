@@ -27,6 +27,9 @@ applications.csv
 applications.export.json
 application_runs.json
 application_metrics.json
+discovery_cache.sqlite3*
+job_results*.tmp
+job_history.json.*.tmp
 
 # Test runtime artifacts
 .test-runtime*/

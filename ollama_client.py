@@ -1,6 +1,7 @@
 # ollama_client.py
 
 import json
+import os
 import re
 import time
 import urllib.request
@@ -94,6 +95,7 @@ def generate_json(
         "think": False,
         "format": "json",
         "options": OLLAMA_OPTIONS,
+        "keep_alive": "30m",
     }
     # AI Assistant shares its /api/chat configuration with child processes.
     # Ollama's chat endpoint requires messages and returns message.content;
@@ -131,18 +133,14 @@ def generate_json(
             #
             # Debug
             #
-            print("\n========== RAW OLLAMA ==========")
-            print(raw_response[:1500])
-            print("\n================================\n")
+            if os.getenv("JOB_AGENT_DEBUG_LLM", "").lower() in {"1", "true"}:
+                print(raw_response[:1500])
 
             parsed = _parse_json_response(raw_response)
 
             #
             # Debug
             #
-            print("========== PARSED JSON ==========")
-            print(parsed)
-            print("=================================\n")
 
             return parsed
 
